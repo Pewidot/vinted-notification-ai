@@ -1,6 +1,35 @@
 
 /.idea
-vinted.db
 /__pycache__
-/logs/vinted.log
-/vinted_notifications.db
+/logs/
+*.log
+
+# Database files (contain personal information like queries, proxies, Discord webhooks)
+*.db
+vinted.db
+vinted_notifications.db
+data/vinted_notifications.db
+
+# Python cache
+*.pyc
+__pycache__/
+*.pyo
+*.pyd
+.Python
+
+# Virtual environment
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Backup files
+*.backup
+*.bak

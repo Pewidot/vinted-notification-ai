@@ -5,7 +5,7 @@ import os
 import db
 import random
 import requests
-from requests.exceptions import HTTPError
+from requests.exceptions import HTTPError, ProxyError, ConnectTimeout, ConnectionError as ReqConnectionError
 
 # Add the parent directory to sys.path to import logger
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -56,6 +56,11 @@ class Requester:
         }
         self.VINTED_AUTH_URL = "https://www.vinted.fr/"
         self.MAX_RETRIES = 3
+
+        # Get request timeout from database (default 30 seconds)
+        timeout_str = db.get_parameter("request_timeout")
+        self.REQUEST_TIMEOUT = int(timeout_str) if timeout_str else 30
+
         self.session = requests.Session()
         self.session.headers.update(self.HEADER)
         self.debug = debug
@@ -96,10 +101,11 @@ class Requester:
 
     def get(self, url, params=None):
         """
-        Make a GET request with retry logic.
+        Make a GET request with retry logic and proxy rotation.
 
         If a 401 status code is received, it will attempt to refresh cookies
         and retry the request up to MAX_RETRIES times.
+        If proxy errors occur, it will try with a different proxy.
 
         Args:
             url (str): The URL to request
@@ -113,58 +119,126 @@ class Requester:
         """
 
         # Set a random proxy for this request
-        proxy_configured = proxies.configure_proxy(self.session)
-        if self.debug and proxy_configured:
-            logger.debug(f"Using proxy: {self.session.proxies}")
+        proxy_configured, current_proxy = proxies.configure_proxy(self.session)
+        if proxy_configured:
+            logger.info(f"Making request to {url} using proxy: {current_proxy}")
+        else:
+            logger.info(f"Making request to {url} without proxy")
 
         tried = 0
         new_session = False
+        proxy_retries = 0
+        max_proxy_retries = 3  # Try up to 3 different proxies
+
         while tried < self.MAX_RETRIES:
             tried += 1
-            with self.session.get(url, params=params) as response:
-                if response.status_code in (401, 404) and tried < self.MAX_RETRIES:
-                    print(f"Cookies invalid, retrying {tried}/{self.MAX_RETRIES}")
-                    if self.debug:
-                        logger.debug(
-                            f"Cookies invalid retrying {tried}/{self.MAX_RETRIES}"
+            try:
+                with self.session.get(url, params=params, timeout=self.REQUEST_TIMEOUT) as response:
+                    if response.status_code in (401, 404) and tried < self.MAX_RETRIES:
+                        logger.warning(
+                            f"Cookies invalid (HTTP {response.status_code}), "
+                            f"retrying {tried}/{self.MAX_RETRIES} | Proxy: {current_proxy or 'None'}"
                         )
-                    self.set_cookies()
-                elif response.status_code == 200:
-                    return response
-                elif tried == self.MAX_RETRIES:
-                    # If we've reached max retries, return the last response
-                    # even if it's not a 200 status code
-
-                    # New try : if we still get a 401 or 403, we reset the session
-                    if response.status_code in (401, 403) and not new_session:
-                        # Log the error details for 401 and 403 errors, including headers and body snippet
-                        logger.error(
-                            f"Received {response.status_code} error for URL: {url}\n"
-                            f"Response headers: {dict(response.headers)}\n"
-                            f"Response body (first 500 chars): {response.text[:500]}"
+                        self.set_cookies()
+                    elif response.status_code == 200:
+                        logger.info(
+                            f"Request successful (HTTP 200) | Proxy: {current_proxy or 'None'}"
                         )
+                        return response
+                    elif tried == self.MAX_RETRIES:
+                        # If we've reached max retries, return the last response
+                        # even if it's not a 200 status code
 
-                        new_session = True
-                        self.session = requests.Session()
-                        self.session.headers.update(self.HEADER)
-                        # proxy
-                        proxy_configured = proxies.configure_proxy(self.session)
-                        if self.debug:
-                            logger.debug(
-                                f"Session reset due to {response.status_code} error"
+                        # New try : if we still get a 401 or 403, we reset the session
+                        if response.status_code in (401, 403) and not new_session:
+                            # Log the error details for 401 and 403 errors, including headers and body snippet
+                            logger.error(
+                                f"Received HTTP {response.status_code} error for URL: {url}\n"
+                                f"   Proxy used: {current_proxy or 'None'}\n"
+                                f"   Response headers: {dict(response.headers)}\n"
+                                f"   Response body (first 500 chars): {response.text[:500]}"
                             )
-                        tried = 0
+
+                            new_session = True
+                            # Close old session before creating new one to prevent memory leak
+                            old_session = self.session
+                            self.session = requests.Session()
+                            self.session.headers.update(self.HEADER)
+                            try:
+                                old_session.close()
+                            except Exception:
+                                pass  # Ignore errors when closing old session
+
+                            # Try with a different proxy
+                            if current_proxy and proxy_retries < max_proxy_retries:
+                                logger.warning(f"Blacklisting failed proxy and trying another: {current_proxy}")
+                                proxies.blacklist_proxy(current_proxy)
+                                proxy_configured, current_proxy = proxies.configure_proxy(self.session)
+                                proxy_retries += 1
+                                if proxy_configured:
+                                    logger.info(f"Retrying with new proxy: {current_proxy}")
+                                else:
+                                    logger.warning("No more proxies available, continuing without proxy")
+                            else:
+                                proxy_configured, current_proxy = proxies.configure_proxy(self.session)
+
+                            tried = 0
+                            continue
+
+                        logger.error(
+                            f"Request failed with HTTP {response.status_code} | "
+                            f"Proxy: {current_proxy or 'None'}"
+                        )
+                        return response
+
+            except (ProxyError, ConnectTimeout, ReqConnectionError) as e:
+                error_type = type(e).__name__
+                logger.error(
+                    f"{error_type} with proxy {current_proxy or 'None'}: {str(e)[:200]}"
+                )
+
+                # Try with a different proxy if available
+                if current_proxy and proxy_retries < max_proxy_retries:
+                    proxies.blacklist_proxy(current_proxy)
+                    proxy_retries += 1
+                    logger.warning(f"Attempting retry {proxy_retries}/{max_proxy_retries} with different proxy...")
+
+                    # Get a new proxy
+                    proxy_configured, current_proxy = proxies.configure_proxy(self.session)
+                    if proxy_configured:
+                        logger.info(f"Retrying with new proxy: {current_proxy}")
+                        tried -= 1  # Don't count proxy errors against regular retry limit
                         continue
-                    return response
+                    else:
+                        logger.warning("No more proxies available, continuing without proxy")
+                        current_proxy = None
+                        tried -= 1
+                        continue
+                else:
+                    # No more proxies to try, fail
+                    logger.error(f"All proxy retry attempts exhausted")
+                    raise HTTPError(
+                        f"Connection failed after {proxy_retries} proxy retries: {error_type} - {str(e)[:200]}"
+                    )
+
+            except Exception as e:
+                error_type = type(e).__name__
+                logger.error(
+                    f"Unexpected error during request: {error_type} - {str(e)[:200]} | "
+                    f"Proxy: {current_proxy or 'None'}"
+                )
+                # For unexpected errors, don't retry with different proxy, just re-raise
+                raise
 
         # This should only happen if the loop exits without returning
         raise HTTPError(
-            f"Failed to get a valid response after {self.MAX_RETRIES} attempts"
+            f"Failed to get a valid response after {self.MAX_RETRIES} attempts | "
+            f"Last proxy: {current_proxy or 'None'}"
         )
 
     def post(self, url, params=None):
         """
-        Make a POST request.
+        Make a POST request with proxy support and error handling.
 
         Args:
             url (str): The URL to request
@@ -177,13 +251,31 @@ class Requester:
             HTTPError: If the request fails
         """
         # Set a random proxy for this request
-        proxy_configured = proxies.configure_proxy(self.session)
-        if self.debug and proxy_configured:
-            logger.debug(f"Using proxy: {self.session.proxies}")
+        proxy_configured, current_proxy = proxies.configure_proxy(self.session)
+        if proxy_configured:
+            logger.info(f"Making POST request to {url} using proxy: {current_proxy}")
+        else:
+            logger.info(f"Making POST request to {url} without proxy")
 
-        response = self.session.post(url, params)
-        response.raise_for_status()
-        return response
+        try:
+            response = self.session.post(url, params, timeout=self.REQUEST_TIMEOUT)
+            response.raise_for_status()
+            logger.info(f"POST request successful (HTTP {response.status_code}) | Proxy: {current_proxy or 'None'}")
+            return response
+        except (ProxyError, ConnectTimeout, ReqConnectionError) as e:
+            error_type = type(e).__name__
+            logger.error(
+                f"{error_type} during POST request with proxy {current_proxy or 'None'}: {str(e)[:200]}"
+            )
+            if current_proxy:
+                proxies.blacklist_proxy(current_proxy)
+            raise
+        except Exception as e:
+            error_type = type(e).__name__
+            logger.error(
+                f"POST request failed: {error_type} - {str(e)[:200]} | Proxy: {current_proxy or 'None'}"
+            )
+            raise
 
     def set_cookies(self):
         """
@@ -194,7 +286,7 @@ class Requester:
         """
         self.session.cookies.clear_session_cookies()
         try:
-            self.session.head(self.VINTED_AUTH_URL)
+            self.session.head(self.VINTED_AUTH_URL, timeout=self.REQUEST_TIMEOUT)
             if self.debug:
                 logger.debug("Cookies set!")
         except Exception:
@@ -213,6 +305,19 @@ class Requester:
         self.session.cookies.update(cookies)
         if self.debug:
             logger.debug(f"Cookies manually updated ({len(cookies)} cookies received)")
+
+    def close(self):
+        """
+        Close the session and clean up resources.
+
+        Should be called when the Requester is no longer needed to prevent resource leaks.
+        """
+        try:
+            self.session.close()
+            if self.debug:
+                logger.debug("Requester session closed")
+        except Exception as e:
+            logger.error(f"Error closing requester session: {e}")
 
     # Alias for backward compatibility
     setLocale = set_locale

@@ -13,14 +13,17 @@ logger = get_logger(__name__)
 _PROXY_CACHE = None
 _PROXY_CACHE_INITIALIZED = False
 _SINGLE_PROXY = None
+_PROXY_BLACKLIST = {}  # Track failed proxies with expiration timestamps: {proxy: expiration_time}
 
-# URL to test proxies against
-_TEST_URL = "https://www.vinted.fr/"
-_TEST_TIMEOUT = 2  # seconds
+# URL to test proxies against - testing directly against Vinted for real-world validation
+_TEST_URL = "https://www.vinted.de/"
 # Maximum number of concurrent workers for proxy checking
-MAX_PROXY_WORKERS = 10
+# Reduced from 90 to 30 to prevent resource exhaustion and potential memory leaks
+MAX_PROXY_WORKERS = 90
 # Time interval in seconds after which proxies should be rechecked (6 hours)
 PROXY_RECHECK_INTERVAL = 6 * 60 * 60
+# Time interval to keep a proxy in blacklist (1 hour)
+PROXY_BLACKLIST_DURATION = 60 * 60
 
 
 def fetch_proxies_from_link(url: str) -> List[str]:
@@ -34,13 +37,19 @@ def fetch_proxies_from_link(url: str) -> List[str]:
         List[str]: List of proxies.
     """
     try:
+        logger.info(f"Fetching proxy list from: {url}")
         response = requests.get(url, timeout=10)
         if response.status_code == 200:
             # Split by newlines and filter out empty lines
-            return [line.strip() for line in response.text.splitlines() if line.strip()]
+            proxies = [line.strip() for line in response.text.splitlines() if line.strip()]
+            logger.info(f"Fetched {len(proxies)} proxies from {url}")
+            return proxies
+        else:
+            logger.warning(f"Failed to fetch proxies from {url}, status code: {response.status_code}")
         return []
-    except Exception:
+    except Exception as e:
         # If there's any error fetching proxies, return an empty list
+        logger.error(f"Error fetching proxies from {url}: {e}")
         return []
 
 
@@ -55,6 +64,7 @@ def check_proxies_parallel(proxies_list: List[str]) -> List[str]:
         List[str]: List of working proxies.
     """
     working_proxies = []
+    logger.info(f"Checking {len(proxies_list)} proxies in parallel...")
 
     # Use ThreadPoolExecutor to check proxies in parallel
     with concurrent.futures.ThreadPoolExecutor(
@@ -66,20 +76,41 @@ def check_proxies_parallel(proxies_list: List[str]) -> List[str]:
         }
 
         # Process results as they complete
+        checked = 0
         for future in concurrent.futures.as_completed(future_to_proxy):
             proxy = future_to_proxy[future]
+            checked += 1
             try:
                 is_working = future.result()
                 if is_working:
                     working_proxies.append(proxy)
-            except Exception:
+                    logger.info(f"[{checked}/{len(proxies_list)}] Proxy working: {proxy}")
+                else:
+                    logger.warning(f"[{checked}/{len(proxies_list)}] Proxy failed: {proxy}")
+            except Exception as e:
                 # If an exception occurred during checking, consider the proxy not working
-                pass
+                logger.warning(f"[{checked}/{len(proxies_list)}] Proxy check exception for {proxy}: {e}")
 
+    logger.info(f"Proxy validation complete: {len(working_proxies)}/{len(proxies_list)} proxies are working")
     return working_proxies
 
 
-def get_random_proxy() -> Optional[str]:
+def _cleanup_expired_blacklist():
+    """
+    Remove expired proxies from the blacklist.
+
+    This function should be called periodically to prevent the blacklist from growing indefinitely.
+    """
+    global _PROXY_BLACKLIST
+    current_time = time.time()
+    expired = [proxy for proxy, expiration in _PROXY_BLACKLIST.items() if current_time >= expiration]
+    for proxy in expired:
+        del _PROXY_BLACKLIST[proxy]
+    if expired:
+        logger.info(f"Removed {len(expired)} expired proxies from blacklist")
+
+
+def get_random_proxy(exclude_blacklisted: bool = True) -> Optional[str]:
     """
     Get a random proxy from the configuration values.
 
@@ -87,9 +118,13 @@ def get_random_proxy() -> Optional[str]:
     - If there are no proxies on first check, never checks again
     - If there is only one proxy, always returns that one
     - Otherwise, returns a random proxy from the cached list
+    - Excludes blacklisted proxies if exclude_blacklisted is True
 
     Proxies are checked in parallel to avoid blocking the main thread.
     Proxies are rechecked if they were checked more than PROXY_RECHECK_INTERVAL seconds ago.
+
+    Args:
+        exclude_blacklisted (bool): Whether to exclude blacklisted proxies. Defaults to True.
 
     Returns:
         Optional[str]: A randomly selected proxy string or None if no working proxies are found.
@@ -100,6 +135,9 @@ def get_random_proxy() -> Optional[str]:
     import db
 
     current_time = time.time()
+
+    # Clean up expired blacklisted proxies to prevent memory leak
+    _cleanup_expired_blacklist()
 
     # Get the last proxy check time from the database
     last_proxy_check_time_str = db.get_parameter("last_proxy_check_time")
@@ -114,6 +152,7 @@ def get_random_proxy() -> Optional[str]:
         and current_time - last_proxy_check_time > PROXY_RECHECK_INTERVAL
     ):
         # Reset cache to force recheck
+        logger.info(f"Proxy cache expired (>{PROXY_RECHECK_INTERVAL}s), rechecking proxies...")
         _PROXY_CACHE_INITIALIZED = False
         _PROXY_CACHE = None
         _SINGLE_PROXY = None
@@ -122,17 +161,31 @@ def get_random_proxy() -> Optional[str]:
     if _PROXY_CACHE_INITIALIZED:
         # If we determined there are no proxies, always return None
         if _PROXY_CACHE is None:
+            logger.debug("No proxies configured")
             return None
-        # If we have a single proxy, always return that one
+
+        # If we have a single proxy, always return that one (unless blacklisted)
         if _SINGLE_PROXY is not None:
+            if exclude_blacklisted and _SINGLE_PROXY in _PROXY_BLACKLIST:
+                logger.warning(f"Single proxy is blacklisted: {_SINGLE_PROXY}")
+                return None
             return _SINGLE_PROXY
-        # Otherwise, return a random proxy from the cache
+
+        # Otherwise, return a random proxy from the cache (excluding blacklisted)
         if _PROXY_CACHE:
-            return random.choice(_PROXY_CACHE)
+            available_proxies = [p for p in _PROXY_CACHE if p not in _PROXY_BLACKLIST] if exclude_blacklisted else _PROXY_CACHE
+            if available_proxies:
+                selected = random.choice(available_proxies)
+                logger.debug(f"Selected proxy: {selected} (from {len(available_proxies)} available)")
+                return selected
+            else:
+                logger.warning(f"All {len(_PROXY_CACHE)} cached proxies are blacklisted")
+                return None
         return None
 
     # Initialize cache on first call or after recheck interval
     _PROXY_CACHE_INITIALIZED = True
+    logger.info("Initializing proxy cache...")
 
     # Update the last check time in the database
     db.set_parameter("last_proxy_check_time", str(current_time))
@@ -145,6 +198,7 @@ def get_random_proxy() -> Optional[str]:
     if proxy_list:
         # If PROXY_LIST is a string with multiple proxies separated by semicolons
         all_proxies = [p.strip() for p in proxy_list.split(";") if p.strip()]
+        logger.info(f"Loaded {len(all_proxies)} proxies from database proxy_list")
 
     # Check if PROXY_LIST_LINK is configured in the database
     proxy_list_link = db.get_parameter("proxy_list_link")
@@ -156,6 +210,8 @@ def get_random_proxy() -> Optional[str]:
     # Check proxies in parallel if we have any and CHECK_PROXIES is True
     if all_proxies:
         check_proxies = db.get_parameter("check_proxies") == "True"
+        logger.info(f"Total proxies to process: {len(all_proxies)}, check_proxies={check_proxies}")
+
         if check_proxies:
             working_proxies = check_proxies_parallel(all_proxies)
             if working_proxies:
@@ -163,18 +219,28 @@ def get_random_proxy() -> Optional[str]:
                 # If there's only one working proxy, cache it separately
                 if len(working_proxies) == 1:
                     _SINGLE_PROXY = working_proxies[0]
+                    logger.info(f"Using single proxy: {_SINGLE_PROXY}")
                     return _SINGLE_PROXY
-                return random.choice(working_proxies)
+                selected = random.choice(working_proxies)
+                logger.info(f"Selected proxy: {selected} from {len(working_proxies)} working proxies")
+                return selected
+            else:
+                logger.error("No working proxies found after validation")
         else:
             # If CHECK_PROXIES is False, just cache all proxies without checking them
             _PROXY_CACHE = all_proxies
+            logger.warning("Proxy checking is disabled, using proxies without validation")
             # If there's only one proxy, cache it separately
             if len(all_proxies) == 1:
                 _SINGLE_PROXY = all_proxies[0]
+                logger.info(f"Using single proxy (unchecked): {_SINGLE_PROXY}")
                 return _SINGLE_PROXY
-            return random.choice(all_proxies)
+            selected = random.choice(all_proxies)
+            logger.info(f"Selected proxy (unchecked): {selected} from {len(all_proxies)} proxies")
+            return selected
 
     # No working proxies found
+    logger.warning("No proxies configured or all proxies failed validation")
     _PROXY_CACHE = None
     return None
 
@@ -209,12 +275,14 @@ def check_proxy(proxy: str) -> bool:
         # Get user agents and default headers from the database
         user_agents_json = db.get_parameter("user_agents")
         default_headers_json = db.get_parameter("default_headers")
+        timeout_str = db.get_parameter("proxy_test_timeout")
 
-        # Parse JSON strings
+        # Parse JSON strings and timeout
         user_agents = json.loads(user_agents_json) if user_agents_json else []
         default_headers = (
             json.loads(default_headers_json) if default_headers_json else {}
         )
+        timeout = int(timeout_str) if timeout_str else 5
 
         # Set random user agent and default headers
         headers = {
@@ -223,13 +291,25 @@ def check_proxy(proxy: str) -> bool:
         }
         session.headers.update(headers)
 
-        # Make a HEAD request to the test URL with the proxy
-        response = session.head(_TEST_URL, proxies=proxy_dict, timeout=_TEST_TIMEOUT)
+        # Make a GET request to the test URL with the proxy (using GET instead of HEAD for better compatibility)
+        response = session.get(_TEST_URL, proxies=proxy_dict, timeout=timeout)
 
         # Check if the request was successful
-        return response.status_code == 200
-    except (RequestException, ConnectionError, TimeoutError):
-        # Any exception means the proxy is not working
+        is_working = response.status_code == 200
+        if not is_working:
+            logger.debug(f"Proxy {proxy} returned status code {response.status_code}")
+        return is_working
+    except TimeoutError as e:
+        logger.debug(f"Proxy {proxy} timed out: {e}")
+        return False
+    except ConnectionError as e:
+        logger.debug(f"Proxy {proxy} connection error: {e}")
+        return False
+    except RequestException as e:
+        logger.debug(f"Proxy {proxy} request exception: {e}")
+        return False
+    except Exception as e:
+        logger.debug(f"Proxy {proxy} unexpected error: {e}")
         return False
     finally:
         # Ensure the session is closed to prevent resource leaks
@@ -239,29 +319,84 @@ def check_proxy(proxy: str) -> bool:
 
 def convert_proxy_string_to_dict(proxy: Optional[str]) -> dict:
     """
-    Convert a proxy string to a dictionary format.
+    Convert a proxy string to a dictionary format compatible with requests library.
+
+    Handles HTTP, HTTPS, SOCKS4, SOCKS4A, and SOCKS5 proxies.
+    For SOCKS proxies, applies the same proxy to both http and https.
 
     Args:
-        proxy (Optional[str]): Proxy string to convert.
+        proxy (Optional[str]): Proxy string to convert (e.g., "http://proxy:8080", "socks5://proxy:1080").
 
     Returns:
-        dict: Proxy configuration dictionary.
+        dict: Proxy configuration dictionary for requests library.
     """
     if proxy is None:
         return {}
 
     if "://" in proxy:
-        # Protocol is specified (e.g., "http://127.0.0.1:8080")
-        protocol, address = proxy.split("://")
-        if protocol == "http":
-            return {"http": f"{proxy}", "https": f"{proxy}"}
-        return {protocol: proxy}
+        # Protocol is specified (e.g., "http://127.0.0.1:8080", "socks5://127.0.0.1:1080")
+        protocol, address = proxy.split("://", 1)
+        protocol_lower = protocol.lower()
+
+        if protocol_lower == "http":
+            # HTTP proxy: apply to both http and https
+            return {"http": proxy, "https": proxy}
+        elif protocol_lower == "https":
+            # HTTPS proxy: typically only for https
+            return {"https": proxy}
+        elif protocol_lower in ("socks5", "socks5h", "socks4", "socks4a"):
+            # SOCKS proxy: apply to both http and https
+            # Note: requests library requires python-socks or pysocks installed
+            return {"http": proxy, "https": proxy}
+        else:
+            # Unknown protocol, try applying to both
+            logger.warning(f"Unknown proxy protocol '{protocol}', applying to both http and https")
+            return {"http": proxy, "https": proxy}
     else:
         # Protocol is not specified, default to http
-        return {"http": f"http://{proxy}", "https": f"https://{proxy}"}
+        return {"http": f"http://{proxy}", "https": f"http://{proxy}"}
 
 
-def configure_proxy(session: requests.Session, proxy: Optional[str] = None) -> bool:
+def blacklist_proxy(proxy: str, duration: int = PROXY_BLACKLIST_DURATION):
+    """
+    Add a proxy to the blacklist to prevent it from being used temporarily.
+
+    Args:
+        proxy (str): Proxy string to blacklist.
+        duration (int): Duration in seconds to keep the proxy blacklisted. Defaults to PROXY_BLACKLIST_DURATION.
+    """
+    global _PROXY_BLACKLIST
+    if proxy:
+        expiration_time = time.time() + duration
+        _PROXY_BLACKLIST[proxy] = expiration_time
+        logger.warning(f"Blacklisted proxy: {proxy} (for {duration}s)")
+
+
+def unblacklist_proxy(proxy: str):
+    """
+    Remove a proxy from the blacklist.
+
+    Args:
+        proxy (str): Proxy string to unblacklist.
+    """
+    global _PROXY_BLACKLIST
+    if proxy in _PROXY_BLACKLIST:
+        del _PROXY_BLACKLIST[proxy]
+        logger.info(f"Removed proxy from blacklist: {proxy}")
+
+
+def clear_blacklist():
+    """
+    Clear all proxies from the blacklist.
+    """
+    global _PROXY_BLACKLIST
+    count = len(_PROXY_BLACKLIST)
+    _PROXY_BLACKLIST.clear()
+    if count > 0:
+        logger.info(f"Cleared {count} proxies from blacklist")
+
+
+def configure_proxy(session: requests.Session, proxy: Optional[str] = None) -> tuple[bool, Optional[str]]:
     """
     Configure the proxy settings for a requests session.
 
@@ -270,7 +405,7 @@ def configure_proxy(session: requests.Session, proxy: Optional[str] = None) -> b
         proxy (Optional[str], optional): Proxy to be used. If None, a random proxy will be selected.
 
     Returns:
-        bool: True if proxy was configured, False otherwise.
+        tuple[bool, Optional[str]]: (True if proxy was configured, the proxy string used)
     """
     # If no proxy is provided, get a random one
     if proxy is None:
@@ -279,7 +414,11 @@ def configure_proxy(session: requests.Session, proxy: Optional[str] = None) -> b
     # If we still don't have a proxy, return False
     if proxy is None:
         session.proxies.clear()
-        return False
+        logger.debug("No proxy configured (none available)")
+        return False, None
+
+    # Store original proxy string before conversion
+    proxy_str = proxy
 
     # Handle string proxy
     if isinstance(proxy, str):
@@ -287,4 +426,5 @@ def configure_proxy(session: requests.Session, proxy: Optional[str] = None) -> b
 
     # Update the session with the proxy settings
     session.proxies.update(proxy)
-    return True
+    logger.debug(f"Configured proxy: {proxy_str}")
+    return True, proxy_str
