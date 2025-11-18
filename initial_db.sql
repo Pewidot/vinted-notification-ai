@@ -57,7 +57,7 @@ VALUES ('telegram_enabled', 'False'),
        ('rss_max_items', '100'),
        ('rss_process_running', 'False'),
 
-       ('version', '1.0.3'),
+       ('version', '1.0.5.6'),
        ('github_url', 'https://github.com/Fuyucch1/Vinted-Notifications'),
 
        ('items_per_query', '20'),

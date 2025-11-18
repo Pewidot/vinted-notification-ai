@@ -18,7 +18,7 @@ VALUES ('request_timeout', '30');
 
 -- Update version
 UPDATE parameters
-SET value = '1.0.5.5'
+SET value = '1.0.5.6'
 WHERE key = 'version';
 
 COMMIT;
