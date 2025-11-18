@@ -12,13 +12,17 @@ VALUES ('default_headers', '{"Accept": "application/json, text/plain, */*", "Acc
 INSERT OR IGNORE INTO parameters (key, value)
 VALUES ('proxy_test_timeout', '5');
 
--- Add configurable request timeout (default 30 seconds to prevent hanging requests)
+-- Add configurable request timeout (default 10 seconds to prevent hanging requests)
 INSERT OR IGNORE INTO parameters (key, value)
-VALUES ('request_timeout', '30');
+VALUES ('request_timeout', '10');
 
--- Add configurable query timeout (default 5 seconds for parallel query processing)
+-- Add configurable query timeout (default 15 seconds for parallel query processing)
 INSERT OR IGNORE INTO parameters (key, value)
-VALUES ('query_timeout', '5');
+VALUES ('query_timeout', '15');
+
+-- Update existing timeout values if they were set to old defaults
+UPDATE parameters SET value = '10' WHERE key = 'request_timeout' AND value = '30';
+UPDATE parameters SET value = '15' WHERE key = 'query_timeout' AND value = '5';
 
 -- Update version
 UPDATE parameters
