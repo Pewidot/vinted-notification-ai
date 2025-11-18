@@ -216,6 +216,8 @@ def get_random_proxy(exclude_blacklisted: bool = True) -> Optional[str]:
             working_proxies = check_proxies_parallel(all_proxies)
             if working_proxies:
                 _PROXY_CACHE = working_proxies
+                # Store validated proxy count in database for stats display
+                db.set_parameter("validated_proxy_count", str(len(working_proxies)))
                 # If there's only one working proxy, cache it separately
                 if len(working_proxies) == 1:
                     _SINGLE_PROXY = working_proxies[0]
@@ -430,38 +432,32 @@ def get_proxy_stats() -> dict:
         total = len(_PROXY_CACHE)
     else:
         # Cache not initialized in this process (likely web UI calling from different process)
-        # Get count from database - count proxies from list/link
-        proxy_list_str = db.get_parameter("proxy_list")
-
-        # Count proxies from direct list
-        if proxy_list_str:
-            proxies_list = [p.strip() for p in proxy_list_str.split(";") if p.strip()]
-            # If validation is enabled, only count them if they've been validated
-            # (we don't know which ones are valid without the cache)
-            if validation_enabled:
-                # Estimate: assume all loaded proxies passed validation
-                # This is not perfect but better than showing 0
-                total = len(proxies_list)
+        # If validation is enabled, get validated count from database
+        if validation_enabled:
+            validated_count_str = db.get_parameter("validated_proxy_count")
+            if validated_count_str:
+                total = int(validated_count_str)
             else:
-                total = len(proxies_list)
-        # If no direct list, check if there's a link configured
+                # No validated count stored yet, show 0 until first validation
+                total = 0
         else:
-            proxy_list_link = db.get_parameter("proxy_list_link")
-            if proxy_list_link:
-                # Fetch proxies from the link
-                try:
-                    proxies_from_link = fetch_proxies_from_link(proxy_list_link)
-                    if proxies_from_link:
-                        if validation_enabled:
-                            # When validation is enabled, we need to check the proxies
-                            # Run validation to get accurate count
-                            working_proxies = check_proxies_parallel(proxies_from_link)
-                            total = len(working_proxies)
-                        else:
-                            total = len(proxies_from_link)
-                except Exception as e:
-                    logger.debug(f"Error fetching proxies for stats: {e}")
-                    total = 0
+            # Validation disabled, count all proxies from database
+            proxy_list_str = db.get_parameter("proxy_list")
+
+            # Count proxies from direct list
+            if proxy_list_str:
+                total = len([p.strip() for p in proxy_list_str.split(";") if p.strip()])
+            # If no direct list, check if there's a link configured
+            else:
+                proxy_list_link = db.get_parameter("proxy_list_link")
+                if proxy_list_link:
+                    # Just fetch and count without validation
+                    try:
+                        proxies_from_link = fetch_proxies_from_link(proxy_list_link)
+                        total = len(proxies_from_link) if proxies_from_link else 0
+                    except Exception as e:
+                        logger.debug(f"Error fetching proxies for stats: {e}")
+                        total = 0
 
     blacklisted = len(_PROXY_BLACKLIST)
     active = total - blacklisted if total > 0 else 0
