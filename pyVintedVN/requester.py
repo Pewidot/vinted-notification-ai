@@ -5,7 +5,7 @@ import os
 import db
 import random
 import requests
-from requests.exceptions import HTTPError, ProxyError, ConnectTimeout, ConnectionError as ReqConnectionError
+from requests.exceptions import HTTPError, ProxyError, ConnectTimeout, ReadTimeout, ConnectionError as ReqConnectionError
 
 # Add the parent directory to sys.path to import logger
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -191,7 +191,7 @@ class Requester:
                         )
                         return response
 
-            except (ProxyError, ConnectTimeout, ReqConnectionError) as e:
+            except (ProxyError, ConnectTimeout, ReadTimeout, ReqConnectionError) as e:
                 error_type = type(e).__name__
                 logger.error(
                     f"{error_type} with proxy {current_proxy or 'None'}: {str(e)[:200]}"
@@ -262,7 +262,7 @@ class Requester:
             response.raise_for_status()
             logger.info(f"POST request successful (HTTP {response.status_code}) | Proxy: {current_proxy or 'None'}")
             return response
-        except (ProxyError, ConnectTimeout, ReqConnectionError) as e:
+        except (ProxyError, ConnectTimeout, ReadTimeout, ReqConnectionError) as e:
             error_type = type(e).__name__
             logger.error(
                 f"{error_type} during POST request with proxy {current_proxy or 'None'}: {str(e)[:200]}"
