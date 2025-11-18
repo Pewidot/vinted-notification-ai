@@ -438,8 +438,18 @@ def get_proxy_stats() -> dict:
             if validated_count_str:
                 total = int(validated_count_str)
             else:
-                # No validated count stored yet, show 0 until first validation
-                total = 0
+                # No validated count stored yet
+                # Show fetched count as estimate until first validation runs
+                proxy_list_link = db.get_parameter("proxy_list_link")
+                if proxy_list_link:
+                    try:
+                        proxies_from_link = fetch_proxies_from_link(proxy_list_link)
+                        total = len(proxies_from_link) if proxies_from_link else 0
+                    except Exception as e:
+                        logger.debug(f"Error fetching proxies for stats: {e}")
+                        total = 0
+                else:
+                    total = 0
         else:
             # Validation disabled, count all proxies from database
             proxy_list_str = db.get_parameter("proxy_list")

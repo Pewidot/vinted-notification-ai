@@ -16,6 +16,10 @@ VALUES ('proxy_test_timeout', '5');
 INSERT OR IGNORE INTO parameters (key, value)
 VALUES ('request_timeout', '30');
 
+-- Add configurable query timeout (default 5 seconds for parallel query processing)
+INSERT OR IGNORE INTO parameters (key, value)
+VALUES ('query_timeout', '5');
+
 -- Update version
 UPDATE parameters
 SET value = '1.0.5.6'
