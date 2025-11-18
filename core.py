@@ -300,11 +300,14 @@ def process_items(queue):
     def process_single_query(query):
         """Process a single query with its own Vinted instance and proxy."""
         try:
-            # Create a new Vinted instance with a different proxy for each query
+            # Import the singleton requester
+            from pyVintedVN.requester import requester
+
+            # Create a new Vinted instance
             vinted = Vinted()
 
-            # Configure a different proxy for this query
-            proxy_configured, current_proxy = proxy_module.configure_proxy(vinted.requester.session)
+            # Configure a different proxy for this query on the singleton requester
+            proxy_configured, current_proxy = proxy_module.configure_proxy(requester.session)
             if proxy_configured:
                 logger.info(f"Query {query[0]} using proxy: {current_proxy}")
             else:

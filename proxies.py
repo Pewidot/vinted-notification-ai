@@ -15,6 +15,11 @@ _PROXY_CACHE_INITIALIZED = False
 _SINGLE_PROXY = None
 _PROXY_BLACKLIST = {}  # Track failed proxies with expiration timestamps: {proxy: expiration_time}
 
+# Cache for stats to avoid fetching proxy list on every dashboard load
+_STATS_CACHE = None
+_STATS_CACHE_TIME = 0
+_STATS_CACHE_DURATION = 60  # Cache stats for 60 seconds
+
 # URL to test proxies against - testing directly against Vinted for real-world validation
 _TEST_URL = "https://www.vinted.de/"
 # Maximum number of concurrent workers for proxy checking
