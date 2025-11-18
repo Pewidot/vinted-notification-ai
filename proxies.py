@@ -396,6 +396,68 @@ def clear_blacklist():
         logger.info(f"Cleared {count} proxies from blacklist")
 
 
+def get_proxy_stats() -> dict:
+    """
+    Get statistics about the proxy system.
+
+    Returns:
+        dict: Dictionary containing:
+            - total_proxies: Total number of proxies cached (validated if check_proxies=True)
+            - blacklisted_proxies: Number of currently blacklisted proxies
+            - active_proxies: Number of working proxies available
+            - validation_enabled: Whether proxy validation is enabled
+    """
+    global _PROXY_CACHE, _PROXY_BLACKLIST, _PROXY_CACHE_INITIALIZED, _SINGLE_PROXY
+
+    # Import db here to avoid circular imports
+    import db
+
+    # Clean up expired blacklist entries first
+    _cleanup_expired_blacklist()
+
+    # Check if proxy validation is enabled
+    validation_enabled = db.get_parameter("check_proxies") == "True"
+
+    # Determine total proxy count (from cache if available)
+    total = 0
+
+    # First check if we have a single proxy
+    if _SINGLE_PROXY is not None:
+        total = 1
+    # Then check if cache is initialized with a list
+    elif _PROXY_CACHE_INITIALIZED and _PROXY_CACHE is not None:
+        total = len(_PROXY_CACHE)
+    else:
+        # Cache not initialized, try to get count from database
+        proxy_list_str = db.get_parameter("proxy_list")
+
+        # Count proxies from direct list
+        if proxy_list_str:
+            total = len([p.strip() for p in proxy_list_str.split(";") if p.strip()])
+        # If no direct list, check if there's a link configured
+        else:
+            proxy_list_link = db.get_parameter("proxy_list_link")
+            if proxy_list_link:
+                # Fetch and count proxies from the link
+                try:
+                    proxies_from_link = fetch_proxies_from_link(proxy_list_link)
+                    if proxies_from_link:
+                        total = len(proxies_from_link)
+                except Exception as e:
+                    logger.debug(f"Error fetching proxies for stats: {e}")
+                    total = 0
+
+    blacklisted = len(_PROXY_BLACKLIST)
+    active = total - blacklisted if total > 0 else 0
+
+    return {
+        "total_proxies": total,
+        "blacklisted_proxies": blacklisted,
+        "active_proxies": active,
+        "validation_enabled": validation_enabled,
+    }
+
+
 def configure_proxy(session: requests.Session, proxy: Optional[str] = None) -> tuple[bool, Optional[str]]:
     """
     Configure the proxy settings for a requests session.

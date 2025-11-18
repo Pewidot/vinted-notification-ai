@@ -1,6 +1,7 @@
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify
 import db
 import core
+import proxies
 import os
 import re
 from urllib.parse import urlparse, parse_qs
@@ -122,6 +123,9 @@ def index():
     else:
         stats["last_item"] = None
 
+    # Get proxy statistics
+    proxy_stats = proxies.get_proxy_stats()
+
     return render_template(
         "index.html",
         params=params,
@@ -130,6 +134,7 @@ def index():
         telegram_running=telegram_running,
         rss_running=rss_running,
         stats=stats,
+        proxy_stats=proxy_stats,
     )
 
 

@@ -9,7 +9,7 @@
 
 <!-- Statistics Section -->
 <div class="row mb-4">
-    <div class="col-md-3">
+    <div class="col-md-4 col-lg-3">
         <div class="card h-100 border-0 shadow-sm">
             <div class="card-body text-center">
                 <div class="d-flex align-items-center justify-content-center mb-3">
@@ -21,7 +21,7 @@
             </div>
         </div>
     </div>
-    <div class="col-md-3">
+    <div class="col-md-4 col-lg-3">
         <div class="card h-100 border-0 shadow-sm">
             <div class="card-body text-center">
                 <div class="d-flex align-items-center justify-content-center mb-3">
@@ -33,7 +33,7 @@
             </div>
         </div>
     </div>
-    <div class="col-md-3">
+    <div class="col-md-4 col-lg-3">
         <div class="card h-100 border-0 shadow-sm">
             <div class="card-body text-center">
                 <div class="d-flex align-items-center justify-content-center mb-3">
@@ -45,7 +45,7 @@
             </div>
         </div>
     </div>
-    <div class="col-md-3">
+    <div class="col-md-12 col-lg-3">
         <div class="card h-100 border-0 shadow-sm">
             <div class="card-body text-center">
                 <div class="d-flex align-items-center justify-content-center mb-3">
@@ -82,6 +82,52 @@
                 {% else %}
                 <p class="text-muted">No items found yet</p>
                 {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Proxy Statistics Section -->
+<div class="row mb-4">
+    <div class="col-md-4">
+        <div class="card h-100 border-0 shadow-sm">
+            <div class="card-body text-center">
+                <div class="d-flex align-items-center justify-content-center mb-3">
+                    <i class="bi bi-hdd-network text-primary" style="font-size: 2rem;"></i>
+                </div>
+                <h5 class="card-title">Total Proxies</h5>
+                <h2 class="display-4 fw-bold text-primary">{{ proxy_stats.total_proxies }}</h2>
+                <p class="card-text text-muted">
+                    {% if proxy_stats.validation_enabled %}
+                    Validated working proxies
+                    {% else %}
+                    Proxies loaded (unvalidated)
+                    {% endif %}
+                </p>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card h-100 border-0 shadow-sm">
+            <div class="card-body text-center">
+                <div class="d-flex align-items-center justify-content-center mb-3">
+                    <i class="bi bi-check-circle text-success" style="font-size: 2rem;"></i>
+                </div>
+                <h5 class="card-title">Active Proxies</h5>
+                <h2 class="display-4 fw-bold text-success">{{ proxy_stats.active_proxies }}</h2>
+                <p class="card-text text-muted">Currently available for use</p>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card h-100 border-0 shadow-sm">
+            <div class="card-body text-center">
+                <div class="d-flex align-items-center justify-content-center mb-3">
+                    <i class="bi bi-x-circle text-danger" style="font-size: 2rem;"></i>
+                </div>
+                <h5 class="card-title">Blacklisted Proxies</h5>
+                <h2 class="display-4 fw-bold text-danger">{{ proxy_stats.blacklisted_proxies }}</h2>
+                <p class="card-text text-muted">Temporarily blocked (1h)</p>
             </div>
         </div>
     </div>
