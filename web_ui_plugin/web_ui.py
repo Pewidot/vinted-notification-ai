@@ -333,6 +333,9 @@ def update_config():
     db.set_parameter("check_proxies", str(check_proxies))
     db.set_parameter("proxy_list", request.form.get("proxy_list", ""))
     db.set_parameter("proxy_list_link", request.form.get("proxy_list_link", ""))
+    db.set_parameter("proxy_test_timeout", request.form.get("proxy_test_timeout", "5"))
+    db.set_parameter("request_timeout", request.form.get("request_timeout", "10"))
+    db.set_parameter("query_timeout", request.form.get("query_timeout", "15"))
 
     # Update Advanced parameters
     db.set_parameter("message_template", request.form.get("message_template", ""))

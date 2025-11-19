@@ -100,9 +100,56 @@ def check_proxies_parallel(proxies_list: List[str]) -> List[str]:
     return working_proxies
 
 
+def _save_blacklist_to_db():
+    """
+    Save the current blacklist to the database for cross-process access.
+    Stores as JSON: {proxy: expiration_time, ...}
+    """
+    import db
+    import json
+
+    global _PROXY_BLACKLIST
+
+    try:
+        blacklist_json = json.dumps(_PROXY_BLACKLIST)
+        db.set_parameter("proxy_blacklist", blacklist_json)
+    except Exception as e:
+        logger.error(f"Failed to save blacklist to database: {e}")
+
+
+def _load_blacklist_from_db():
+    """
+    Load the blacklist from the database and merge with in-memory cache.
+    Automatically removes expired entries.
+    """
+    import db
+    import json
+
+    global _PROXY_BLACKLIST
+
+    try:
+        blacklist_json = db.get_parameter("proxy_blacklist")
+        if blacklist_json:
+            db_blacklist = json.loads(blacklist_json)
+
+            # Merge with current in-memory blacklist, keeping the later expiration time
+            current_time = time.time()
+            for proxy, expiration in db_blacklist.items():
+                # Only add if not expired
+                if expiration > current_time:
+                    # Keep the later expiration if proxy already in memory
+                    if proxy in _PROXY_BLACKLIST:
+                        _PROXY_BLACKLIST[proxy] = max(_PROXY_BLACKLIST[proxy], expiration)
+                    else:
+                        _PROXY_BLACKLIST[proxy] = expiration
+    except Exception as e:
+        logger.debug(f"Failed to load blacklist from database: {e}")
+
+
 def _cleanup_expired_blacklist():
     """
     Remove expired proxies from the blacklist.
+    Updates both in-memory cache and database.
 
     This function should be called periodically to prevent the blacklist from growing indefinitely.
     """
@@ -113,6 +160,8 @@ def _cleanup_expired_blacklist():
         del _PROXY_BLACKLIST[proxy]
     if expired:
         logger.info(f"Removed {len(expired)} expired proxies from blacklist")
+        # Update database after cleanup
+        _save_blacklist_to_db()
 
 
 def get_random_proxy(exclude_blacklisted: bool = True) -> Optional[str]:
@@ -233,6 +282,8 @@ def get_random_proxy(exclude_blacklisted: bool = True) -> Optional[str]:
                 return selected
             else:
                 logger.error("No working proxies found after validation")
+                # Store 0 count so web UI knows validation completed but found nothing
+                db.set_parameter("validated_proxy_count", "0")
         else:
             # If CHECK_PROXIES is False, just cache all proxies without checking them
             _PROXY_CACHE = all_proxies
@@ -367,6 +418,7 @@ def convert_proxy_string_to_dict(proxy: Optional[str]) -> dict:
 def blacklist_proxy(proxy: str, duration: int = PROXY_BLACKLIST_DURATION):
     """
     Add a proxy to the blacklist to prevent it from being used temporarily.
+    Stores in both in-memory cache and database for cross-process access.
 
     Args:
         proxy (str): Proxy string to blacklist.
@@ -377,6 +429,9 @@ def blacklist_proxy(proxy: str, duration: int = PROXY_BLACKLIST_DURATION):
         expiration_time = time.time() + duration
         _PROXY_BLACKLIST[proxy] = expiration_time
         logger.warning(f"Blacklisted proxy: {proxy} (for {duration}s)")
+
+        # Store in database for cross-process access
+        _save_blacklist_to_db()
 
 
 def unblacklist_proxy(proxy: str):
@@ -418,6 +473,9 @@ def get_proxy_stats() -> dict:
 
     # Import db here to avoid circular imports
     import db
+
+    # Load blacklist from database (for cross-process access)
+    _load_blacklist_from_db()
 
     # Clean up expired blacklist entries first
     _cleanup_expired_blacklist()

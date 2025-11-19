@@ -300,21 +300,25 @@ def process_items(queue):
     def process_single_query(query):
         """Process a single query with its own Vinted instance and proxy."""
         try:
-            # Import the singleton requester
-            from pyVintedVN.requester import requester
+            # Create a new Requester instance with its own session for thread safety
+            from pyVintedVN.requester import Requester
 
-            # Create a new Vinted instance
-            vinted = Vinted()
+            # Each thread gets its own requester instance to avoid race conditions
+            thread_requester = Requester()
 
-            # Configure a different proxy for this query on the singleton requester
-            proxy_configured, current_proxy = proxy_module.configure_proxy(requester.session)
+            # Configure a different proxy for this query
+            proxy_configured, current_proxy = proxy_module.configure_proxy(thread_requester.session)
             if proxy_configured:
                 logger.info(f"Query {query[0]} using proxy: {current_proxy}")
             else:
                 logger.info(f"Query {query[0]} using no proxy")
 
+            # Create Items instance with this thread's requester
+            from pyVintedVN.items import Items
+            items_instance = Items(thread_requester)
+
             # Search with timeout
-            all_items = vinted.items.search(query[1], nbr_items=items_per_query)
+            all_items = items_instance.search(query[1], nbr_items=items_per_query)
 
             # Filter to only include new items
             data = [item for item in all_items if item.is_new_item()]

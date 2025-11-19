@@ -192,6 +192,34 @@
                                             </div>
                                         </div>
                                     </div>
+                                    <div class="row">
+                                        <div class="col-md-6">
+                                            <div class="mb-3">
+                                                <label for="proxy_test_timeout" class="form-label">Proxy Test Timeout (seconds)</label>
+                                                <input type="number" class="form-control" id="proxy_test_timeout"
+                                                       name="proxy_test_timeout" value="{{ params.proxy_test_timeout }}" min="1" max="60">
+                                                <small class="form-text text-muted">Timeout when testing if a proxy is working (default: 5s)</small>
+                                            </div>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <div class="mb-3">
+                                                <label for="request_timeout" class="form-label">Request Timeout (seconds)</label>
+                                                <input type="number" class="form-control" id="request_timeout"
+                                                       name="request_timeout" value="{{ params.request_timeout }}" min="1" max="120">
+                                                <small class="form-text text-muted">Timeout for HTTP requests via proxies (default: 10s)</small>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="row">
+                                        <div class="col-md-6">
+                                            <div class="mb-3">
+                                                <label for="query_timeout" class="form-label">Query Timeout (seconds)</label>
+                                                <input type="number" class="form-control" id="query_timeout"
+                                                       name="query_timeout" value="{{ params.query_timeout }}" min="5" max="300">
+                                                <small class="form-text text-muted">Max time allowed per search query in parallel processing (default: 15s)</small>
+                                            </div>
+                                        </div>
+                                    </div>
                                 </div>
                             </div>
                         </div>
