@@ -319,7 +319,8 @@ def set_parameter(key, value):
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("UPDATE parameters SET value=? WHERE key=?", (value, key))
+        # Use INSERT OR REPLACE to create parameter if it doesn't exist
+        cursor.execute("INSERT OR REPLACE INTO parameters (key, value) VALUES (?, ?)", (key, value))
         conn.commit()
     except Exception:
         print_exc()

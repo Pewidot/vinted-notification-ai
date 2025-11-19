@@ -272,6 +272,7 @@ def get_random_proxy(exclude_blacklisted: bool = True) -> Optional[str]:
                 _PROXY_CACHE = working_proxies
                 # Store validated proxy count in database for stats display
                 db.set_parameter("validated_proxy_count", str(len(working_proxies)))
+                logger.info(f"Stored validated_proxy_count={len(working_proxies)} in database")
                 # If there's only one working proxy, cache it separately
                 if len(working_proxies) == 1:
                     _SINGLE_PROXY = working_proxies[0]
@@ -284,6 +285,7 @@ def get_random_proxy(exclude_blacklisted: bool = True) -> Optional[str]:
                 logger.error("No working proxies found after validation")
                 # Store 0 count so web UI knows validation completed but found nothing
                 db.set_parameter("validated_proxy_count", "0")
+                logger.info("Stored validated_proxy_count=0 in database")
         else:
             # If CHECK_PROXIES is False, just cache all proxies without checking them
             _PROXY_CACHE = all_proxies

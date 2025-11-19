@@ -276,8 +276,8 @@ def get_user_country(profile_id):
 
 def process_items(queue):
     """
-    Process all queries from the database in parallel, search for items, and put them in the queue.
-    Each query gets a different proxy and has a 5-second timeout.
+    Process all queries from the database sequentially, search for items, and put them in the queue.
+    Each query gets a different proxy.
 
     Args:
         queue (Queue, optional): The queue to put the items in. Defaults to the global items_queue.
@@ -285,76 +285,31 @@ def process_items(queue):
     Returns:
         None
     """
-    import concurrent.futures
-    import proxies as proxy_module
-
     all_queries = db.get_queries()
 
     # Get the number of items per query from the database
     items_per_query = int(db.get_parameter("items_per_query"))
 
-    # Get query timeout from database (default 5 seconds)
-    query_timeout_str = db.get_parameter("query_timeout")
-    query_timeout = int(query_timeout_str) if query_timeout_str else 5
+    # Create a Vinted instance (uses singleton requester)
+    vinted = Vinted()
 
-    def process_single_query(query):
-        """Process a single query with its own Vinted instance and proxy."""
+    for query in all_queries:
         try:
-            # Create a new Requester instance with its own session for thread safety
-            from pyVintedVN.requester import Requester
+            logger.info(f"Processing query {query[0]}: {query[1]}")
 
-            # Each thread gets its own requester instance to avoid race conditions
-            thread_requester = Requester()
-
-            # Configure a different proxy for this query
-            proxy_configured, current_proxy = proxy_module.configure_proxy(thread_requester.session)
-            if proxy_configured:
-                logger.info(f"Query {query[0]} using proxy: {current_proxy}")
-            else:
-                logger.info(f"Query {query[0]} using no proxy")
-
-            # Create Items instance with this thread's requester
-            from pyVintedVN.items import Items
-            items_instance = Items(thread_requester)
-
-            # Search with timeout
-            all_items = items_instance.search(query[1], nbr_items=items_per_query)
+            # Search for items
+            all_items = vinted.items.search(query[1], nbr_items=items_per_query)
 
             # Filter to only include new items
             data = [item for item in all_items if item.is_new_item()]
 
             logger.info(f"Scraped {len(data)} items for query: {query[1]}")
-            return (data, query[0])
+            queue.put((data, query[0]))
 
         except Exception as e:
             logger.error(f"Error processing query {query[0]}: {e}")
-            # Return empty result on error
-            return ([], query[0])
-
-    # Process queries in parallel
-    # Limit workers to avoid resource exhaustion (max 10 concurrent queries)
-    max_workers = min(len(all_queries), 10) if all_queries else 1
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all queries
-        future_to_query = {
-            executor.submit(process_single_query, query): query
-            for query in all_queries
-        }
-
-        # Process results as they complete
-        for future in concurrent.futures.as_completed(future_to_query):
-            query = future_to_query[future]
-            try:
-                # Per-query timeout from database configuration
-                result = future.result(timeout=query_timeout)
-                queue.put(result)
-            except concurrent.futures.TimeoutError:
-                logger.error(f"Query {query[0]} timed out after {query_timeout} seconds")
-                queue.put(([], query[0]))
-            except Exception as e:
-                logger.error(f"Query {query[0]} raised exception: {e}")
-                queue.put(([], query[0]))
+            # Put empty result on error
+            queue.put(([], query[0]))
 
 
 def clear_item_queue(items_queue, new_items_queue):
