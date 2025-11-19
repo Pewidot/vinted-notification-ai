@@ -505,23 +505,15 @@ def get_proxy_stats() -> dict:
                 # Don't fetch from URL, just show 0 until validation runs
                 total = 0
         else:
-            # Validation disabled, count all proxies from database
+            # Validation disabled, only count proxies from direct database list
+            # DO NOT fetch from URL - that's only done during actual proxy initialization
             proxy_list_str = db.get_parameter("proxy_list")
-
-            # Count proxies from direct list
             if proxy_list_str:
                 total = len([p.strip() for p in proxy_list_str.split(";") if p.strip()])
-            # If no direct list, check if there's a link configured
             else:
-                proxy_list_link = db.get_parameter("proxy_list_link")
-                if proxy_list_link:
-                    # Just fetch and count without validation
-                    try:
-                        proxies_from_link = fetch_proxies_from_link(proxy_list_link)
-                        total = len(proxies_from_link) if proxies_from_link else 0
-                    except Exception as e:
-                        logger.debug(f"Error fetching proxies for stats: {e}")
-                        total = 0
+                # No direct proxy list - show 0 instead of fetching
+                # The actual proxy count will be available after first scraper run
+                total = 0
 
     blacklisted = len(_PROXY_BLACKLIST)
     active = total - blacklisted if total > 0 else 0
