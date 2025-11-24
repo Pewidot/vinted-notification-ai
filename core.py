@@ -349,12 +349,28 @@ def clear_item_queue(items_queue, new_items_queue):
             else:
                 # We create the message
                 message_template = db.get_parameter("message_template")
-                content = message_template.format(
-                    title=item.title,
-                    price=str(item.price) + " " + item.currency,
-                    brand=item.brand_title,
-                    image=None if item.photo is None else item.photo,
-                )
+
+                # Handle case where template is empty or None
+                if not message_template:
+                    logger.warning(f"Message template is empty, using default for item {item.id}")
+                    message_template = "<b>{title}</b>\n💰 {price}\n🏷️ {brand}"
+
+                try:
+                    content = message_template.format(
+                        title=item.title or "No title",
+                        price=str(item.price) + " " + item.currency if item.price else "No price",
+                        brand=item.brand_title or "No brand",
+                        image=None if item.photo is None else item.photo,
+                    )
+                except Exception as e:
+                    logger.error(f"Error formatting message template: {e}, using fallback")
+                    content = f"<b>{item.title}</b>\n💰 {item.price} {item.currency}\n🏷️ {item.brand_title}"
+
+                # Ensure content is not empty
+                if not content or not content.strip():
+                    logger.warning(f"Generated content is empty for item {item.id}, using minimal fallback")
+                    content = f"New item: {item.title or 'Unknown'}"
+
                 # add the item to the queue
                 new_items_queue.put((content, item.url, "Open Vinted", None, None))
                 # new_items_queue.put((content, item.url, "Open Vinted", item.buy_url, "Open buy page"))

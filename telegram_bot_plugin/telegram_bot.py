@@ -257,6 +257,12 @@ class LeRobot:
                 buttons = [[InlineKeyboardButton(text=text, url=url)]]
                 if buy_url and buy_text:
                     buttons.append([InlineKeyboardButton(text=buy_text, url=buy_url)])
+
+                # Handle empty content by providing a fallback message
+                if not content or not content.strip():
+                    logger.warning(f"Message content is empty for URL {url}, using fallback message")
+                    content = f"New item available: {url}"
+
                 await self.bot.send_message(
                     chat_ID,
                     content,
