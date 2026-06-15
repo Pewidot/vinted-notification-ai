@@ -4,8 +4,22 @@ import sys
 import os
 import db
 import random
-import requests
-from requests.exceptions import HTTPError, ProxyError, ConnectTimeout, ReadTimeout, ConnectionError as ReqConnectionError
+# Vinted now serves its API behind a Cloudflare bot challenge that fingerprints
+# the TLS/JA3 handshake. The plain `requests` library gets challenged (HTTP 200
+# with an HTML "Please wait" page instead of JSON), so we use curl_cffi which can
+# impersonate a real browser's TLS fingerprint and pass the challenge.
+from curl_cffi import requests
+from curl_cffi.requests.exceptions import (
+    HTTPError,
+    ProxyError,
+    ConnectTimeout,
+    ReadTimeout,
+    ConnectionError as ReqConnectionError,
+)
+
+# Browser profile used by curl_cffi to impersonate the TLS fingerprint.
+# "chrome" tracks the latest supported Chrome version in the installed curl_cffi.
+IMPERSONATE_BROWSER = "chrome"
 
 # Add the parent directory to sys.path to import logger
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -61,7 +75,7 @@ class Requester:
         timeout_str = db.get_parameter("request_timeout")
         self.REQUEST_TIMEOUT = int(timeout_str) if timeout_str else 30
 
-        self.session = requests.Session()
+        self.session = requests.Session(impersonate=IMPERSONATE_BROWSER)
         self.session.headers.update(self.HEADER)
         self.debug = debug
 
@@ -133,63 +147,63 @@ class Requester:
         while tried < self.MAX_RETRIES:
             tried += 1
             try:
-                with self.session.get(url, params=params, timeout=self.REQUEST_TIMEOUT) as response:
-                    if response.status_code in (401, 404) and tried < self.MAX_RETRIES:
-                        logger.warning(
-                            f"Cookies invalid (HTTP {response.status_code}), "
-                            f"retrying {tried}/{self.MAX_RETRIES} | Proxy: {current_proxy or 'None'}"
-                        )
-                        self.set_cookies()
-                    elif response.status_code == 200:
-                        logger.info(
-                            f"Request successful (HTTP 200) | Proxy: {current_proxy or 'None'}"
-                        )
-                        return response
-                    elif tried == self.MAX_RETRIES:
-                        # If we've reached max retries, return the last response
-                        # even if it's not a 200 status code
+                response = self.session.get(url, params=params, timeout=self.REQUEST_TIMEOUT)
+                if response.status_code in (401, 404) and tried < self.MAX_RETRIES:
+                    logger.warning(
+                        f"Cookies invalid (HTTP {response.status_code}), "
+                        f"retrying {tried}/{self.MAX_RETRIES} | Proxy: {current_proxy or 'None'}"
+                    )
+                    self.set_cookies()
+                elif response.status_code == 200:
+                    logger.info(
+                        f"Request successful (HTTP 200) | Proxy: {current_proxy or 'None'}"
+                    )
+                    return response
+                elif tried == self.MAX_RETRIES:
+                    # If we've reached max retries, return the last response
+                    # even if it's not a 200 status code
 
-                        # New try : if we still get a 401 or 403, we reset the session
-                        if response.status_code in (401, 403) and not new_session:
-                            # Log the error details for 401 and 403 errors, including headers and body snippet
-                            logger.error(
-                                f"Received HTTP {response.status_code} error for URL: {url}\n"
-                                f"   Proxy used: {current_proxy or 'None'}\n"
-                                f"   Response headers: {dict(response.headers)}\n"
-                                f"   Response body (first 500 chars): {response.text[:500]}"
-                            )
-
-                            new_session = True
-                            # Close old session before creating new one to prevent memory leak
-                            old_session = self.session
-                            self.session = requests.Session()
-                            self.session.headers.update(self.HEADER)
-                            try:
-                                old_session.close()
-                            except Exception:
-                                pass  # Ignore errors when closing old session
-
-                            # Try with a different proxy
-                            if current_proxy and proxy_retries < max_proxy_retries:
-                                logger.warning(f"Blacklisting failed proxy and trying another: {current_proxy}")
-                                proxies.blacklist_proxy(current_proxy)
-                                proxy_configured, current_proxy = proxies.configure_proxy(self.session)
-                                proxy_retries += 1
-                                if proxy_configured:
-                                    logger.info(f"Retrying with new proxy: {current_proxy}")
-                                else:
-                                    logger.warning("No more proxies available, continuing without proxy")
-                            else:
-                                proxy_configured, current_proxy = proxies.configure_proxy(self.session)
-
-                            tried = 0
-                            continue
-
+                    # New try : if we still get a 401 or 403, we reset the session
+                    if response.status_code in (401, 403) and not new_session:
+                        # Log the error details for 401 and 403 errors, including headers and body snippet
                         logger.error(
-                            f"Request failed with HTTP {response.status_code} | "
-                            f"Proxy: {current_proxy or 'None'}"
+                            f"Received HTTP {response.status_code} error for URL: {url}\n"
+                            f"   Proxy used: {current_proxy or 'None'}\n"
+                            f"   Response headers: {dict(response.headers)}\n"
+                            f"   Response body (first 500 chars): {response.text[:500]}"
                         )
-                        return response
+
+                        new_session = True
+                        # Close old session before creating new one to prevent memory leak
+                        old_session = self.session
+                        self.session = requests.Session(impersonate=IMPERSONATE_BROWSER)
+                        self.session.headers.update(self.HEADER)
+                        try:
+                            old_session.close()
+                        except Exception:
+                            pass  # Ignore errors when closing old session
+
+                        # Try with a different proxy
+                        if current_proxy and proxy_retries < max_proxy_retries:
+                            logger.warning(f"Blacklisting failed proxy and trying another: {current_proxy}")
+                            proxies.blacklist_proxy(current_proxy)
+                            proxy_configured, current_proxy = proxies.configure_proxy(self.session)
+                            proxy_retries += 1
+                            if proxy_configured:
+                                logger.info(f"Retrying with new proxy: {current_proxy}")
+                            else:
+                                logger.warning("No more proxies available, continuing without proxy")
+                        else:
+                            proxy_configured, current_proxy = proxies.configure_proxy(self.session)
+
+                        tried = 0
+                        continue
+
+                    logger.error(
+                        f"Request failed with HTTP {response.status_code} | "
+                        f"Proxy: {current_proxy or 'None'}"
+                    )
+                    return response
 
             except (ProxyError, ConnectTimeout, ReadTimeout, ReqConnectionError) as e:
                 error_type = type(e).__name__
@@ -284,7 +298,7 @@ class Requester:
         Clears the current session cookies and makes a HEAD request to
         the Vinted authentication URL to get new cookies.
         """
-        self.session.cookies.clear_session_cookies()
+        self.session.cookies.clear()
         try:
             self.session.head(self.VINTED_AUTH_URL, timeout=self.REQUEST_TIMEOUT)
             if self.debug:

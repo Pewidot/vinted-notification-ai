@@ -1,7 +1,7 @@
 from pyVintedVN.items.item import Item
 from pyVintedVN.requester import requester
 from urllib.parse import urlparse, parse_qsl
-from requests.exceptions import HTTPError
+from curl_cffi.requests.exceptions import HTTPError
 from typing import List, Dict, Optional
 from pyVintedVN.settings import Urls
 
