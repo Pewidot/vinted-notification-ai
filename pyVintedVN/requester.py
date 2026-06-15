@@ -12,6 +12,7 @@ from curl_cffi import requests
 from curl_cffi.requests.exceptions import (
     HTTPError,
     ProxyError,
+    Timeout,
     ConnectTimeout,
     ReadTimeout,
     ConnectionError as ReqConnectionError,
@@ -205,7 +206,10 @@ class Requester:
                     )
                     return response
 
-            except (ProxyError, ConnectTimeout, ReadTimeout, ReqConnectionError) as e:
+            # Timeout is the base class for ConnectTimeout/ReadTimeout; curl_cffi raises
+            # the base Timeout for curl error 28, so catch it here to rotate proxies
+            # instead of letting it fall through to the generic handler below.
+            except (ProxyError, Timeout, ConnectTimeout, ReadTimeout, ReqConnectionError) as e:
                 error_type = type(e).__name__
                 logger.error(
                     f"{error_type} with proxy {current_proxy or 'None'}: {str(e)[:200]}"
