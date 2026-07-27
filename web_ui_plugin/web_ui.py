@@ -423,6 +423,27 @@ def update_config():
     return redirect(url_for("config"))
 
 
+@app.route("/reset_proxies", methods=["POST"])
+def reset_proxies():
+    # Wipe all proxy data (pools, blacklists, counts) for every platform and
+    # signal every process to reload. Then re-validate all platforms in parallel
+    # in the background so the request returns immediately.
+    proxies.reset_all_proxy_data()
+    import threading
+
+    threading.Thread(
+        target=proxies.validate_all_platforms,
+        kwargs={"parallel": True},
+        name="proxy-reset-revalidate",
+        daemon=True,
+    ).start()
+    flash(
+        "All proxy data reset. Re-validating Vinted, Kleinanzeigen and eBay proxies in parallel...",
+        "success",
+    )
+    return redirect(url_for("config"))
+
+
 @app.route("/telegram_bots")
 def telegram_bots():
     bots = db.get_telegram_bots()

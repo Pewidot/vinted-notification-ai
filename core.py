@@ -372,32 +372,25 @@ def get_user_country(profile_id):
     return user_country
 
 
-def process_items(queue):
+def _scrape_platform_queries(platform, queries, items_per_query, queue):
     """
-    Process all queries from the database sequentially, search for items, and put them in the queue.
-    Each query gets a different proxy.
+    Scrape all queries of a single platform sequentially and put results on the
+    queue. Runs in its own thread so the three platforms scrape in parallel.
+
+    Sequential within a platform on purpose: the Vinted requester is a shared
+    singleton and each platform draws from its own proxy pool, so we don't want
+    concurrent requests within the same platform.
 
     Args:
-        queue (Queue, optional): The queue to put the items in. Defaults to the global items_queue.
-
-    Returns:
-        None
+        platform (str): 'vinted', 'kleinanzeigen' or 'ebay'
+        queries (list): Query rows for this platform
+        items_per_query (int): Number of items to request per query
+        queue (Queue): Queue to put (data, query_id) results on
     """
-    all_queries = db.get_queries()
+    # Create a Vinted instance only for the vinted worker (uses singleton requester)
+    vinted = Vinted() if platform == "vinted" else None
 
-    # Get the number of items per query from the database
-    items_per_query = int(db.get_parameter("items_per_query"))
-
-    # Create a Vinted instance (uses singleton requester)
-    vinted = Vinted()
-
-    for query in all_queries:
-        platform = (query[6] if len(query) > 6 and query[6] else "vinted").lower()
-        # Skip paused (inactive) queries entirely
-        active = query[7] if len(query) > 7 and query[7] is not None else 1
-        if not active:
-            logger.debug(f"[{platform.upper()}] Skipping paused query {query[0]}")
-            continue
+    for query in queries:
         try:
             logger.info(f"[{platform.upper()}] Scraping query {query[0]}: {query[1]}")
 
@@ -426,6 +419,59 @@ def process_items(queue):
             logger.error(f"[{platform.upper()}] Error processing query {query[0]}: {e}")
             # Put empty result on error
             queue.put(([], query[0]))
+
+
+def process_items(queue):
+    """
+    Scrape all active queries and put their results on the queue.
+
+    Queries are grouped by platform (vinted / kleinanzeigen / ebay) and each
+    platform is scraped in its own thread, so a slow platform (e.g. eBay with
+    session warming and proxy rotation) does not hold up the others. Within a
+    platform, queries run sequentially.
+
+    Args:
+        queue (Queue): The queue to put the (items, query_id) results on.
+
+    Returns:
+        None
+    """
+    import threading
+    from collections import defaultdict
+
+    all_queries = db.get_queries()
+
+    # Get the number of items per query from the database
+    items_per_query = int(db.get_parameter("items_per_query"))
+
+    # Group active queries by platform
+    queries_by_platform = defaultdict(list)
+    for query in all_queries:
+        platform = (query[6] if len(query) > 6 and query[6] else "vinted").lower()
+        # Skip paused (inactive) queries entirely
+        active = query[7] if len(query) > 7 and query[7] is not None else 1
+        if not active:
+            logger.debug(f"[{platform.upper()}] Skipping paused query {query[0]}")
+            continue
+        queries_by_platform[platform].append(query)
+
+    if not queries_by_platform:
+        return
+
+    # One thread per platform -> the three scrapers run in parallel
+    threads = [
+        threading.Thread(
+            target=_scrape_platform_queries,
+            args=(platform, queries, items_per_query, queue),
+            name=f"scraper-{platform}",
+            daemon=True,
+        )
+        for platform, queries in queries_by_platform.items()
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
 
 
 def clear_item_queue(items_queue, new_items_queue):
@@ -470,7 +516,10 @@ def clear_item_queue(items_queue, new_items_queue):
                 # Handle case where template is empty or None
                 if not message_template:
                     logger.warning(f"Message template is empty, using default for item {item.id}")
-                    message_template = "<b>{title}</b>\n💰 {price}\n🏷️ {brand}"
+                    message_template = "🔎 {query}\n<b>{title}</b>\n💰 {price}\n🏷️ {brand}"
+
+                # Human-readable name of the query that found this item
+                query_name = db.get_query_name(query_id)
 
                 try:
                     content = message_template.format(
@@ -478,19 +527,33 @@ def clear_item_queue(items_queue, new_items_queue):
                         price=str(item.price) + " " + item.currency if item.price else "No price",
                         brand=item.brand_title or "No brand",
                         image=None if item.photo is None else item.photo,
+                        query=query_name or "",
                     )
                 except Exception as e:
                     logger.error(f"Error formatting message template: {e}, using fallback")
                     content = f"<b>{item.title}</b>\n💰 {item.price} {item.currency}\n🏷️ {item.brand_title}"
+
+                # If the template doesn't reference the query name, prepend it so
+                # the message always shows which query matched.
+                if query_name and "{query}" not in message_template:
+                    content = f"🔎 {query_name}\n{content}"
 
                 # Ensure content is not empty
                 if not content or not content.strip():
                     logger.warning(f"Generated content is empty for item {item.id}, using minimal fallback")
                     content = f"New item: {item.title or 'Unknown'}"
 
-                # add the item to the queue (query_id lets the telegram bot pick the right chat)
-                new_items_queue.put((content, item.url, "Open Vinted", None, None, query_id))
-                # new_items_queue.put((content, item.url, "Open Vinted", item.buy_url, "Open buy page", query_id))
+                # Button label matches the item's platform
+                button_text = {
+                    "vinted": "Open Vinted",
+                    "kleinanzeigen": "Open Kleinanzeigen",
+                    "ebay": "Open eBay",
+                }.get(getattr(item, "platform", "vinted"), "Open listing")
+
+                # add the item to the queue (query_id lets the telegram bot pick the right chat,
+                # item.photo lets it attach the image as a real photo)
+                new_items_queue.put((content, item.url, button_text, None, None, query_id, item.photo))
+                # new_items_queue.put((content, item.url, button_text, item.buy_url, "Open buy page", query_id, item.photo))
                 # Add the item to the db
                 db.add_item_to_db(
                     id=item.id,

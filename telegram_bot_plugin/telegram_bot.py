@@ -268,19 +268,46 @@ class LeRobot:
 
     ### TELEGRAM SPECIFIC FUNCTIONS ###
 
-    async def send_new_post(self, token, chat_id, content, url, text, buy_url=None, buy_text=None):
-        """Send a single item to one bot (by token) and chat."""
+    async def send_new_post(self, token, chat_id, content, url, text, buy_url=None, buy_text=None, photo_url=None):
+        """Send a single item to one bot (by token) and chat.
+
+        If a photo URL is available, the item is sent as a real photo with the
+        message as caption (reliable across all platforms), otherwise as a text
+        message. Falls back to a text message if sending the photo fails.
+        """
         try:
             bot = self._get_bot(token)
             async with bot:
                 buttons = [[InlineKeyboardButton(text=text, url=url)]]
                 if buy_url and buy_text:
                     buttons.append([InlineKeyboardButton(text=buy_text, url=buy_url)])
+                markup = InlineKeyboardMarkup(buttons)
 
                 # Handle empty content by providing a fallback message
                 if not content or not content.strip():
                     logger.warning(f"Message content is empty for URL {url}, using fallback message")
                     content = f"New item available: {url}"
+
+                if photo_url:
+                    # Telegram photo captions are limited to 1024 characters
+                    caption = content if len(content) <= 1024 else content[:1021] + "..."
+                    try:
+                        await bot.send_photo(
+                            chat_id,
+                            photo=photo_url,
+                            caption=caption,
+                            parse_mode="HTML",
+                            read_timeout=40,
+                            write_timeout=40,
+                            reply_markup=markup,
+                        )
+                        return
+                    except RetryAfter:
+                        raise
+                    except Exception as e:
+                        logger.warning(
+                            f"send_photo failed ({str(e)[:120]}), falling back to text message"
+                        )
 
                 await bot.send_message(
                     chat_id,
@@ -288,7 +315,7 @@ class LeRobot:
                     parse_mode="HTML",
                     read_timeout=40,
                     write_timeout=40,
-                    reply_markup=InlineKeyboardMarkup(buttons),
+                    reply_markup=markup,
                 )
         except RetryAfter as e:
             retry_after = e.retry_after
@@ -297,7 +324,7 @@ class LeRobot:
             )
             await asyncio.sleep(retry_after + 2)
             # Retry sending the message
-            await self.send_new_post(token, chat_id, content, url, text, buy_url, buy_text)
+            await self.send_new_post(token, chat_id, content, url, text, buy_url, buy_text, photo_url)
         except Exception as e:
             logger.error(f"Error sending new post: {str(e)}", exc_info=True)
 
@@ -323,12 +350,14 @@ class LeRobot:
             while 1:
                 if not self.new_items_queue.empty():
                     queue_item = self.new_items_queue.get()
-                    # Older queue entries may not carry a query_id
-                    if len(queue_item) == 6:
-                        content, url, text, buy_url, buy_text, query_id = queue_item
-                    else:
-                        content, url, text, buy_url, buy_text = queue_item
-                        query_id = None
+                    # Unpack robustly - older queue entries may be shorter
+                    content = queue_item[0]
+                    url = queue_item[1]
+                    text = queue_item[2]
+                    buy_url = queue_item[3] if len(queue_item) > 3 else None
+                    buy_text = queue_item[4] if len(queue_item) > 4 else None
+                    query_id = queue_item[5] if len(queue_item) > 5 else None
+                    photo_url = queue_item[6] if len(queue_item) > 6 else None
 
                     # Resolve which bots/chats should receive this item
                     enabled, targets = db.get_query_telegram_targets(query_id)
@@ -346,7 +375,7 @@ class LeRobot:
                     # Send to every selected bot/chat
                     for bot_id, bot_name, token, chat_id in targets:
                         await self.send_new_post(
-                            token, chat_id, content, url, text, buy_url, buy_text
+                            token, chat_id, content, url, text, buy_url, buy_text, photo_url
                         )
                 else:
                     await asyncio.sleep(0.1)

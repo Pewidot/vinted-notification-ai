@@ -1,6 +1,7 @@
 import random
 import requests
 import time
+import threading
 from requests.exceptions import RequestException
 import concurrent.futures
 from typing import List, Optional
@@ -29,6 +30,7 @@ _PROXY_CACHE = {}              # {platform: [proxies] or None}
 _PROXY_CACHE_INITIALIZED = {}  # {platform: bool}
 _SINGLE_PROXY = {}             # {platform: proxy str or None}
 _PROXY_BLACKLIST = {}          # {platform: {proxy: expiration_time}}
+_PROXY_CACHE_TIME = {}         # {platform: epoch when this platform's cache was (re)initialized}
 
 # Maximum number of concurrent workers for proxy checking
 MAX_PROXY_WORKERS = 90
@@ -221,6 +223,19 @@ def get_random_proxy(platform: str = DEFAULT_PLATFORM, exclude_blacklisted: bool
     _cleanup_expired_blacklist(platform)
     blacklist = _get_blacklist(platform)
 
+    # Cross-process reset signal: if a proxy-data reset happened after this
+    # platform's cache was last (re)initialized, drop the in-memory cache so it
+    # reloads the fresh (persisted or re-validated) pool. This lets a reset
+    # triggered in the web UI process take effect in the scraper process.
+    reset_at_str = db.get_parameter("proxy_reset_at")
+    reset_at = float(reset_at_str) if reset_at_str else 0
+    if reset_at > _PROXY_CACHE_TIME.get(platform, 0):
+        logger.info(f"[{platform}] Proxy reset signal detected, dropping in-memory cache")
+        _PROXY_CACHE_INITIALIZED[platform] = False
+        _PROXY_CACHE.pop(platform, None)
+        _SINGLE_PROXY.pop(platform, None)
+        blacklist.clear()
+
     # Get the last proxy check time for this platform from the database
     last_proxy_check_time_str = db.get_parameter(_pkey("last_proxy_check_time", platform))
     last_proxy_check_time = (
@@ -269,6 +284,7 @@ def get_random_proxy(platform: str = DEFAULT_PLATFORM, exclude_blacklisted: bool
 
     # Initialize cache on first call or after recheck interval
     _PROXY_CACHE_INITIALIZED[platform] = True
+    _PROXY_CACHE_TIME[platform] = current_time
     logger.info(f"[{platform}] Initializing proxy cache...")
 
     # Reuse a recently-validated pool across restarts: if the last check for this
@@ -570,6 +586,71 @@ def clear_blacklist(platform: Optional[str] = None):
             logger.info(f"[{plat}] Cleared {count} proxies from blacklist")
 
 
+def reset_all_proxy_data():
+    """
+    Reset ALL proxy data for every platform: validated pools, blacklists,
+    counts and last-check times, plus this process's in-memory caches.
+
+    Also stamps a global `proxy_reset_at` timestamp so that other processes
+    (e.g. the scraper) drop their in-memory caches and reload on their next use.
+    After a reset each platform re-validates its proxies from scratch.
+    """
+    import db
+
+    now = time.time()
+    for platform in PLATFORMS:
+        db.set_parameter(_pkey("validated_proxies", platform), "")
+        db.set_parameter(_pkey("validated_proxy_count", platform), "0")
+        db.set_parameter(_pkey("proxy_blacklist", platform), "")
+        # Force a full re-validation on next use (epoch 1 is always > 12h ago)
+        db.set_parameter(_pkey("last_proxy_check_time", platform), "1")
+        _PROXY_CACHE.pop(platform, None)
+        _PROXY_CACHE_INITIALIZED.pop(platform, None)
+        _SINGLE_PROXY.pop(platform, None)
+        _PROXY_BLACKLIST.pop(platform, None)
+        _PROXY_CACHE_TIME.pop(platform, None)
+
+    # Cross-process reset signal
+    db.set_parameter("proxy_reset_at", str(now))
+    logger.info("All proxy data reset (caches, blacklists, validated lists, counts)")
+
+
+def validate_all_platforms(parallel: bool = True) -> dict:
+    """
+    (Re)validate the proxy pools of all platforms. With parallel=True the three
+    platforms are validated concurrently (each still validating its own proxies
+    with a thread pool internally).
+
+    Returns:
+        dict: {platform: number_of_usable_proxies}
+    """
+    results = {}
+
+    def _do(platform):
+        # Force a fresh initialization for this platform
+        _PROXY_CACHE_INITIALIZED[platform] = False
+        _PROXY_CACHE.pop(platform, None)
+        _SINGLE_PROXY.pop(platform, None)
+        get_random_proxy(platform)  # triggers fetch + validate + persist
+        results[platform] = get_proxy_stats(platform)["total_proxies"]
+
+    if parallel:
+        threads = [
+            threading.Thread(target=_do, args=(plat,), name=f"proxycheck-{plat}", daemon=True)
+            for plat in PLATFORMS
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    else:
+        for plat in PLATFORMS:
+            _do(plat)
+
+    logger.info(f"Proxy validation complete for all platforms: {results}")
+    return results
+
+
 def get_proxy_stats(platform: str = DEFAULT_PLATFORM) -> dict:
     """
     Get statistics about the proxy system for a single platform.
@@ -596,27 +677,39 @@ def get_proxy_stats(platform: str = DEFAULT_PLATFORM) -> dict:
     # Check if proxy validation is enabled (global toggle)
     validation_enabled = db.get_parameter("check_proxies") == "True"
 
-    # Determine total proxy count
-    total = 0
+    # Determine the current proxy pool. Prefer the in-memory cache; otherwise
+    # fall back to the persisted validated list (works across processes/restarts).
+    pool = None
     if _SINGLE_PROXY.get(platform) is not None:
-        total = 1
-    elif _PROXY_CACHE_INITIALIZED.get(platform) and _PROXY_CACHE.get(platform) is not None:
-        total = len(_PROXY_CACHE[platform])
+        pool = [_SINGLE_PROXY[platform]]
+    elif _PROXY_CACHE_INITIALIZED.get(platform) and _PROXY_CACHE.get(platform):
+        pool = list(_PROXY_CACHE[platform])
     else:
-        # Cache not initialized in this process (e.g. web UI in a different process)
-        if validation_enabled:
-            validated_count_str = db.get_parameter(_pkey("validated_proxy_count", platform))
-            total = int(validated_count_str) if validated_count_str else 0
-        else:
-            # Validation disabled, count proxies from the direct database list
-            proxy_list_str = db.get_parameter(_pkey("proxy_list", platform))
-            if proxy_list_str:
-                total = len([p.strip() for p in proxy_list_str.split(";") if p.strip()])
-            else:
-                total = 0
+        persisted = db.get_parameter(_pkey("validated_proxies", platform))
+        if persisted:
+            pool = [p.strip() for p in persisted.split(";") if p.strip()]
 
-    blacklisted = len(_get_blacklist(platform))
-    active = total - blacklisted if total > 0 else 0
+    blacklist = _get_blacklist(platform)
+
+    if pool is not None:
+        total = len(pool)
+        # Only count blacklisted proxies that are actually part of the pool, so
+        # stale blacklist entries (from a previous, larger pool or the raw list)
+        # can never push the active count negative.
+        blacklisted = sum(1 for p in pool if p in blacklist)
+    else:
+        # No pool known yet (e.g. validation not run). Best-effort counts from
+        # the configured count / raw list.
+        validated_count_str = db.get_parameter(_pkey("validated_proxy_count", platform))
+        if validation_enabled and validated_count_str:
+            total = int(validated_count_str)
+        else:
+            proxy_list_str = db.get_parameter(_pkey("proxy_list", platform))
+            total = len([p.strip() for p in proxy_list_str.split(";") if p.strip()]) if proxy_list_str else 0
+        blacklisted = min(len(blacklist), total)
+
+    # Never report a negative number of active proxies
+    active = max(0, total - blacklisted)
 
     return {
         "platform": platform,

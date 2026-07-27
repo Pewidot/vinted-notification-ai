@@ -326,6 +326,42 @@ def get_query_active(query_id):
             conn.close()
 
 
+def get_query_name(query_id):
+    """
+    Get a human-readable name for a query: its stored name, or the search term
+    extracted from the URL (search_text for Vinted, _nkw for eBay), or the URL.
+
+    Returns:
+        str: The query display name (empty string if not found)
+    """
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT query_name, query FROM queries WHERE id=?", (query_id,))
+        row = cursor.fetchone()
+        if not row:
+            return ""
+        name, url = row
+        if name:
+            return name
+        from urllib.parse import urlparse, parse_qs
+
+        params = parse_qs(urlparse(url or "").query)
+        return (
+            params.get("search_text", [None])[0]
+            or params.get("_nkw", [None])[0]
+            or url
+            or ""
+        )
+    except Exception:
+        print_exc()
+        return ""
+    finally:
+        if conn:
+            conn.close()
+
+
 def get_query_platform(query_id):
     """
     Get the platform of a query ('vinted', 'kleinanzeigen' or 'ebay').
