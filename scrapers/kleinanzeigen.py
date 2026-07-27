@@ -2,8 +2,8 @@
 Kleinanzeigen scraper.
 
 Fetches a kleinanzeigen.de search URL and parses the result list from the HTML.
-Uses the same proxy pool as the Vinted requester (proxies.configure_proxy /
-proxies.blacklist_proxy) with rotation on failures.
+Uses the platform-specific Kleinanzeigen proxy pool (proxies.configure_proxy /
+proxies.blacklist_proxy with platform="kleinanzeigen") with rotation on failures.
 
 Parsing approach based on https://github.com/Superschnizel/Kleinanzeigen-Telegram-Bot
 """
@@ -171,7 +171,7 @@ def _fetch(url):
 
     last_error = None
     for attempt in range(1, MAX_PROXY_RETRIES + 1):
-        proxy_configured, current_proxy = proxies.configure_proxy(session)
+        proxy_configured, current_proxy = proxies.configure_proxy(session, "kleinanzeigen")
         logger.info(
             f"Fetching Kleinanzeigen page (attempt {attempt}/{MAX_PROXY_RETRIES}) | "
             f"Proxy: {current_proxy or 'None'}"
@@ -185,14 +185,14 @@ def _fetch(url):
                 f"Kleinanzeigen returned HTTP {response.status_code} | Proxy: {current_proxy or 'None'}"
             )
             if current_proxy:
-                proxies.blacklist_proxy(current_proxy)
+                proxies.blacklist_proxy(current_proxy, "kleinanzeigen")
         except requests.RequestException as e:
             last_error = e
             logger.warning(
                 f"{type(e).__name__} fetching Kleinanzeigen | Proxy: {current_proxy or 'None'}: {str(e)[:200]}"
             )
             if current_proxy:
-                proxies.blacklist_proxy(current_proxy)
+                proxies.blacklist_proxy(current_proxy, "kleinanzeigen")
 
     raise requests.HTTPError(
         f"Failed to fetch Kleinanzeigen page after {MAX_PROXY_RETRIES} attempts: {last_error}"

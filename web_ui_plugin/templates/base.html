@@ -197,6 +197,12 @@
                         </a>
                     </li>
                     <li class="nav-item">
+                        <a class="nav-link {% if request.path == '/telegram_bots' %}active{% endif %}"
+                           href="/telegram_bots">
+                            <i class="bi bi-robot me-2"></i> Telegram Bots
+                        </a>
+                    </li>
+                    <li class="nav-item">
                         <a class="nav-link {% if request.path == '/config' %}active{% endif %}" href="/config">
                             <i class="bi bi-gear me-2"></i> Configuration
                         </a>

@@ -134,8 +134,8 @@ def index():
     else:
         stats["last_item"] = None
 
-    # Get proxy statistics
-    proxy_stats = proxies.get_proxy_stats()
+    # Get proxy statistics (aggregated + per platform)
+    proxy_stats = proxies.get_all_proxy_stats()
 
     return render_template(
         "index.html",
@@ -176,6 +176,7 @@ def queries():
             logger.debug(f"Error getting last timestamp for query {query[0]}: {e}")
             last_found_item = "Never"
 
+        linked_bots = db.get_query_bots(query[0])
         formatted_queries.append(
             {
                 "id": i + 1,
@@ -183,29 +184,35 @@ def queries():
                 "query": query[1],
                 "display": query_name if query_name else query[1],
                 "last_found_item": last_found_item,
-                "telegram_chat_id": query[4] if query[4] else "",
                 "telegram_enabled": True if query[5] is None else bool(query[5]),
                 "platform": (query[6] if len(query) > 6 and query[6] else "vinted"),
+                "bot_ids": [b[0] for b in linked_bots],
+                "bot_names": [b[1] for b in linked_bots],
             }
         )
 
-    return render_template("queries.html", queries=formatted_queries)
+    all_bots = db.get_telegram_bots()
+    bots = [
+        {"id": b[0], "name": b[1], "enabled": bool(b[4]), "is_command_bot": bool(b[5])}
+        for b in all_bots
+    ]
+    return render_template("queries.html", queries=formatted_queries, bots=bots)
 
 
 @app.route("/add_query", methods=["POST"])
 def add_query():
     query = request.form.get("query")
     query_name = request.form.get("query_name", "").strip()
-    telegram_chat_id = request.form.get("telegram_chat_id", "").strip()
     platform = request.form.get("platform", "vinted").strip().lower()
     if platform not in ("vinted", "kleinanzeigen", "ebay"):
         platform = "vinted"
+    bot_ids = [int(b) for b in request.form.getlist("bot_ids") if b.isdigit()]
     if query:
         message, is_new_query = core.process_query(
             query,
             name=query_name if query_name != "" else None,
-            telegram_chat_id=telegram_chat_id if telegram_chat_id != "" else None,
             platform=platform,
+            bot_ids=bot_ids,
         )
         if is_new_query:
             flash(f"Query added: {query}", "success")
@@ -243,14 +250,14 @@ def remove_all_queries():
 def update_query(query_id):
     query = request.form.get("query")
     query_name = request.form.get("query_name", "").strip()
-    telegram_chat_id = request.form.get("telegram_chat_id", "").strip()
+    bot_ids = [int(b) for b in request.form.getlist("bot_ids") if b.isdigit()]
 
     if query:
         message, success = core.process_update_query(
             query_id,
             query,
             name=query_name if query_name != "" else None,
-            telegram_chat_id=telegram_chat_id if telegram_chat_id != "" else None,
+            bot_ids=bot_ids,
         )
         if success:
             flash("Query updated", "success")
@@ -358,17 +365,9 @@ def config():
 
 @app.route("/update_config", methods=["POST"])
 def update_config():
-    # Update Telegram parameters
+    # Update Telegram parameters (bots are managed on the Telegram Bots page)
     telegram_enabled = "telegram_enabled" in request.form
     db.set_parameter("telegram_enabled", str(telegram_enabled))
-    db.set_parameter("telegram_token", request.form.get("telegram_token", ""))
-    db.set_parameter("telegram_chat_id", request.form.get("telegram_chat_id", ""))
-
-    # Update eBay API parameters
-    db.set_parameter("ebay_app_id", request.form.get("ebay_app_id", "").strip())
-    db.set_parameter("ebay_cert_id", request.form.get("ebay_cert_id", "").strip())
-    ebay_marketplace = request.form.get("ebay_marketplace", "EBAY_DE").strip() or "EBAY_DE"
-    db.set_parameter("ebay_marketplace", ebay_marketplace)
 
     # Update RSS parameters
     rss_enabled = "rss_enabled" in request.form
@@ -386,23 +385,104 @@ def update_config():
     # Update Proxy parameters
     check_proxies = "check_proxies" in request.form
     db.set_parameter("check_proxies", str(check_proxies))
-    db.set_parameter("proxy_list", request.form.get("proxy_list", ""))
-    db.set_parameter("proxy_list_link", request.form.get("proxy_list_link", ""))
     db.set_parameter("proxy_test_timeout", request.form.get("proxy_test_timeout", "5"))
     db.set_parameter("request_timeout", request.form.get("request_timeout", "10"))
     db.set_parameter("query_timeout", request.form.get("query_timeout", "15"))
+
+    # Per-platform proxy lists (vinted, kleinanzeigen, ebay)
+    for platform in proxies.PLATFORMS:
+        db.set_parameter(
+            f"proxy_list_{platform}", request.form.get(f"proxy_list_{platform}", "")
+        )
+        db.set_parameter(
+            f"proxy_list_link_{platform}",
+            request.form.get(f"proxy_list_link_{platform}", ""),
+        )
+        # Reset this platform's proxy cache so the change takes effect on next use
+        db.set_parameter(f"last_proxy_check_time_{platform}", "1")
 
     # Update Advanced parameters
     db.set_parameter("message_template", request.form.get("message_template", ""))
     db.set_parameter("user_agents", request.form.get("user_agents", "[]"))
     db.set_parameter("default_headers", request.form.get("default_headers", "{}"))
 
-    # Reset proxy cache to force refresh on next use
-    db.set_parameter("last_proxy_check_time", "1")
-    logger.info("Proxy settings updated, cache reset")
+    logger.info("Configuration updated, per-platform proxy caches reset")
 
     flash("Configuration updated", "success")
     return redirect(url_for("config"))
+
+
+@app.route("/telegram_bots")
+def telegram_bots():
+    bots = db.get_telegram_bots()
+    formatted_bots = [
+        {
+            "id": b[0],
+            "name": b[1] or "",
+            "token": b[2] or "",
+            "chat_id": b[3] or "",
+            "enabled": bool(b[4]),
+            "is_command_bot": bool(b[5]),
+        }
+        for b in bots
+    ]
+    return render_template("telegram_bots.html", bots=formatted_bots)
+
+
+@app.route("/add_telegram_bot", methods=["POST"])
+def add_telegram_bot():
+    name = request.form.get("name", "").strip()
+    token = request.form.get("token", "").strip()
+    chat_id = request.form.get("chat_id", "").strip()
+    enabled = "enabled" in request.form
+    is_command_bot = "is_command_bot" in request.form
+
+    if not name or not token or not chat_id:
+        flash("Name, token and chat ID are required", "error")
+        return redirect(url_for("telegram_bots"))
+
+    if db.add_telegram_bot(name, token, chat_id, enabled, is_command_bot) is not None:
+        flash(f"Bot '{name}' added", "success")
+    else:
+        flash("Failed to add bot", "error")
+    return redirect(url_for("telegram_bots"))
+
+
+@app.route("/update_telegram_bot/<int:bot_id>", methods=["POST"])
+def update_telegram_bot(bot_id):
+    name = request.form.get("name", "").strip()
+    token = request.form.get("token", "").strip()
+    chat_id = request.form.get("chat_id", "").strip()
+    enabled = "enabled" in request.form
+    is_command_bot = True if "is_command_bot" in request.form else None
+
+    if not name or not token or not chat_id:
+        flash("Name, token and chat ID are required", "error")
+        return redirect(url_for("telegram_bots"))
+
+    if db.update_telegram_bot(bot_id, name, token, chat_id, enabled, is_command_bot):
+        flash(f"Bot '{name}' updated", "success")
+    else:
+        flash("Failed to update bot", "error")
+    return redirect(url_for("telegram_bots"))
+
+
+@app.route("/delete_telegram_bot/<int:bot_id>", methods=["POST"])
+def delete_telegram_bot(bot_id):
+    if db.delete_telegram_bot(bot_id):
+        flash("Bot deleted", "success")
+    else:
+        flash("Failed to delete bot", "error")
+    return redirect(url_for("telegram_bots"))
+
+
+@app.route("/set_command_bot/<int:bot_id>", methods=["POST"])
+def set_command_bot(bot_id):
+    if db.set_command_bot(bot_id):
+        flash("Command bot updated", "success")
+    else:
+        flash("Failed to set command bot", "error")
+    return redirect(url_for("telegram_bots"))
 
 
 @app.route("/control/<process_name>/<action>", methods=["POST"])
@@ -418,14 +498,12 @@ def control_process(process_name, action):
                     {"status": "warning", "message": "Telegram bot already running"}
                 )
 
-            # Check if telegram_token and telegram_chat_id are set
-            telegram_token = db.get_parameter("telegram_token")
-            telegram_chat_id = db.get_parameter("telegram_chat_id")
-            if not telegram_token or not telegram_chat_id:
+            # Check that at least one enabled bot has a token and chat id
+            if not db.has_active_telegram_bot():
                 return jsonify(
                     {
                         "status": "error",
-                        "message": "Please set Telegram token and chat ID in the configuration panel before starting the Telegram process",
+                        "message": "Please add at least one Telegram bot (with token and chat ID) on the Telegram Bots page before starting the Telegram process",
                     }
                 )
 

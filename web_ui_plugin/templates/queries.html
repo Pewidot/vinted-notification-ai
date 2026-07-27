@@ -54,18 +54,24 @@
                                    placeholder="My search">
                         </div>
 
-                        <!-- Telegram chat ID (optional) -->
+                        <!-- Telegram bots (optional) -->
                         <div class="col-md-2">
-                            <label for="telegram_chat_id" class="form-label">Telegram chat ID&nbsp;<span
+                            <label for="bot_ids" class="form-label">Telegram bots&nbsp;<span
                                     class="text-muted">(optional)</span></label>
-                            <input type="text"
-                                   class="form-control"
-                                   id="telegram_chat_id"
-                                   name="telegram_chat_id"
-                                   placeholder="Default chat ID">
+                            {% if bots %}
+                            <select class="form-select" id="bot_ids" name="bot_ids" multiple size="3">
+                                {% for bot in bots %}
+                                <option value="{{ bot.id }}">{{ bot.name }}{% if not bot.enabled %} (disabled){% endif %}</option>
+                                {% endfor %}
+                            </select>
                             <div class="form-text">
-                                Leave empty to use the default chat ID
+                                None selected = command bot
                             </div>
+                            {% else %}
+                            <div class="form-text">
+                                No bots yet. <a href="/telegram_bots">Add one</a>.
+                            </div>
+                            {% endif %}
                         </div>
 
                         <div class="col-md-2 d-flex align-items-center">
@@ -93,7 +99,7 @@
                             <th>#</th>
                             <th>Query</th>
                             <th>Last Found Item</th>
-                            <th>Telegram Chat</th>
+                            <th>Telegram Bots</th>
                             <th>Actions</th>
                         </tr>
                         </thead>
@@ -113,10 +119,12 @@
                             </td>
                             <td>{{ query.last_found_item }}</td>
                             <td>
-                                {% if query.telegram_chat_id %}
-                                <span class="badge bg-info text-dark">{{ query.telegram_chat_id }}</span>
+                                {% if query.bot_names %}
+                                {% for bn in query.bot_names %}
+                                <span class="badge bg-info text-dark">{{ bn }}</span>
+                                {% endfor %}
                                 {% else %}
-                                <span class="badge bg-secondary">Default</span>
+                                <span class="badge bg-secondary">Command bot</span>
                                 {% endif %}
                                 {% if query.telegram_enabled %}
                                 <span class="badge bg-success">Active</span>
@@ -131,12 +139,12 @@
                                         {% if query.telegram_enabled %}
                                         <button type="submit" class="btn btn-sm btn-outline-warning"
                                                 title="Disable Telegram notifications for this query">
-                                            <i class="bi bi-bell-slash"></i> Disable Chat
+                                            <i class="bi bi-bell-slash"></i> Disable
                                         </button>
                                         {% else %}
                                         <button type="submit" class="btn btn-sm btn-outline-success"
                                                 title="Enable Telegram notifications for this query">
-                                            <i class="bi bi-bell"></i> Enable Chat
+                                            <i class="bi bi-bell"></i> Enable
                                         </button>
                                         {% endif %}
                                     </form>
@@ -170,7 +178,7 @@
                                                 <div class="modal-body">
                                                     <div class="mb-3">
                                                         <label for="query{{ query.id }}" class="form-label">
-                                                            {% if query.platform == 'ebay' %}eBay search term
+                                                            {% if query.platform == 'ebay' %}eBay search URL or term
                                                             {% elif query.platform == 'kleinanzeigen' %}Kleinanzeigen search URL
                                                             {% else %}Vinted search URL{% endif %}
                                                             <span class="text-danger">*</span></label>
@@ -193,18 +201,28 @@
                                                                placeholder="My search">
                                                     </div>
                                                     <div class="mb-3">
-                                                        <label for="telegram_chat_id{{ query.id }}"
-                                                               class="form-label">Telegram chat ID
+                                                        <label for="bot_ids{{ query.id }}"
+                                                               class="form-label">Telegram bots
                                                             <span class="text-muted">(optional)</span></label>
-                                                        <input type="text"
-                                                               class="form-control"
-                                                               id="telegram_chat_id{{ query.id }}"
-                                                               name="telegram_chat_id"
-                                                               value="{{ query.telegram_chat_id }}"
-                                                               placeholder="Default chat ID">
+                                                        {% if bots %}
+                                                        <select class="form-select" id="bot_ids{{ query.id }}"
+                                                                name="bot_ids" multiple size="4">
+                                                            {% for bot in bots %}
+                                                            <option value="{{ bot.id }}"
+                                                                    {% if bot.id in query.bot_ids %}selected{% endif %}>
+                                                                {{ bot.name }}{% if not bot.enabled %} (disabled){% endif %}
+                                                            </option>
+                                                            {% endfor %}
+                                                        </select>
                                                         <div class="form-text">
-                                                            Leave empty to use the default chat ID
+                                                            None selected = command bot. Ctrl/Cmd-click to select
+                                                            multiple.
                                                         </div>
+                                                        {% else %}
+                                                        <div class="form-text">
+                                                            No bots configured. <a href="/telegram_bots">Add one</a>.
+                                                        </div>
+                                                        {% endif %}
                                                     </div>
                                                 </div>
                                                 <div class="modal-footer">
@@ -311,9 +329,9 @@
                 help: 'Paste a Kleinanzeigen search URL (uses the shared proxy pool)'
             },
             ebay: {
-                label: 'eBay search term or URL',
-                placeholder: 'nike air max 90  |  https://www.ebay.de/sch/i.html?_nkw=...',
-                help: 'Plain search term = official eBay API (needs API key). Paste an eBay search URL instead to scrape it directly - no API key, filters like location are kept.'
+                label: 'eBay search URL or term',
+                placeholder: 'https://www.ebay.de/sch/i.html?_nkw=...  |  nike air max 90',
+                help: 'Paste an eBay search URL (filters like location are kept) or a plain search term. Scraped directly - no API key, no proxy.'
             }
         };
 

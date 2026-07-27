@@ -121,6 +121,45 @@
     </div>
 </div>
 
+<!-- Per-platform proxy breakdown -->
+{% if proxy_stats.per_platform %}
+<div class="row mb-4">
+    <div class="col-md-12">
+        <div class="card">
+            <div class="card-header d-flex align-items-center">
+                <i class="bi bi-hdd-network me-2 text-info"></i>
+                <h5 class="card-title mb-0">Proxies per Platform</h5>
+            </div>
+            <div class="card-body p-0">
+                <div class="table-responsive">
+                    <table class="table table-hover mb-0 align-middle">
+                        <thead>
+                        <tr>
+                            <th>Platform</th>
+                            <th class="text-center">Active</th>
+                            <th class="text-center">Blacklisted</th>
+                            <th class="text-center">Total</th>
+                        </tr>
+                        </thead>
+                        <tbody>
+                        {% for plat, label, badge in [('vinted', 'Vinted', 'bg-success'), ('kleinanzeigen', 'Kleinanzeigen', 'bg-warning text-dark'), ('ebay', 'eBay', 'bg-primary')] %}
+                        {% set s = proxy_stats.per_platform[plat] %}
+                        <tr>
+                            <td><span class="badge {{ badge }}">{{ label }}</span></td>
+                            <td class="text-center text-success fw-bold">{{ s.active_proxies }}</td>
+                            <td class="text-center text-danger">{{ s.blacklisted_proxies }}</td>
+                            <td class="text-center">{{ s.total_proxies }}</td>
+                        </tr>
+                        {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+
 <div class="row mb-4">
     <div class="col-md-12">
         <div class="card">

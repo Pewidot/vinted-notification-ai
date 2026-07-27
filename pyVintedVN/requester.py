@@ -134,7 +134,7 @@ class Requester:
         """
 
         # Set a random proxy for this request
-        proxy_configured, current_proxy = proxies.configure_proxy(self.session)
+        proxy_configured, current_proxy = proxies.configure_proxy(self.session, "vinted")
         if proxy_configured:
             logger.info(f"Making request to {url} using proxy: {current_proxy}")
         else:
@@ -187,15 +187,15 @@ class Requester:
                         # Try with a different proxy
                         if current_proxy and proxy_retries < max_proxy_retries:
                             logger.warning(f"Blacklisting failed proxy and trying another: {current_proxy}")
-                            proxies.blacklist_proxy(current_proxy)
-                            proxy_configured, current_proxy = proxies.configure_proxy(self.session)
+                            proxies.blacklist_proxy(current_proxy, "vinted")
+                            proxy_configured, current_proxy = proxies.configure_proxy(self.session, "vinted")
                             proxy_retries += 1
                             if proxy_configured:
                                 logger.info(f"Retrying with new proxy: {current_proxy}")
                             else:
                                 logger.warning("No more proxies available, continuing without proxy")
                         else:
-                            proxy_configured, current_proxy = proxies.configure_proxy(self.session)
+                            proxy_configured, current_proxy = proxies.configure_proxy(self.session, "vinted")
 
                         tried = 0
                         continue
@@ -217,12 +217,12 @@ class Requester:
 
                 # Try with a different proxy if available
                 if current_proxy and proxy_retries < max_proxy_retries:
-                    proxies.blacklist_proxy(current_proxy)
+                    proxies.blacklist_proxy(current_proxy, "vinted")
                     proxy_retries += 1
                     logger.warning(f"Attempting retry {proxy_retries}/{max_proxy_retries} with different proxy...")
 
                     # Get a new proxy
-                    proxy_configured, current_proxy = proxies.configure_proxy(self.session)
+                    proxy_configured, current_proxy = proxies.configure_proxy(self.session, "vinted")
                     if proxy_configured:
                         logger.info(f"Retrying with new proxy: {current_proxy}")
                         tried -= 1  # Don't count proxy errors against regular retry limit
@@ -269,7 +269,7 @@ class Requester:
             HTTPError: If the request fails
         """
         # Set a random proxy for this request
-        proxy_configured, current_proxy = proxies.configure_proxy(self.session)
+        proxy_configured, current_proxy = proxies.configure_proxy(self.session, "vinted")
         if proxy_configured:
             logger.info(f"Making POST request to {url} using proxy: {current_proxy}")
         else:
@@ -286,7 +286,7 @@ class Requester:
                 f"{error_type} during POST request with proxy {current_proxy or 'None'}: {str(e)[:200]}"
             )
             if current_proxy:
-                proxies.blacklist_proxy(current_proxy)
+                proxies.blacklist_proxy(current_proxy, "vinted")
             raise
         except Exception as e:
             error_type = type(e).__name__

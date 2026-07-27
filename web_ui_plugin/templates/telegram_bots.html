@@ -1,0 +1,205 @@
+{% extends "base.html" %}
+
+{% block title %}Telegram Bots - Vinted Notifications{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
+    <h1 class="h2">Telegram Bots</h1>
+</div>
+
+<div class="row mb-4">
+    <div class="col-md-12">
+        <div class="card">
+            <div class="card-header d-flex align-items-center">
+                <i class="bi bi-plus-circle me-2 text-info"></i>
+                <h5 class="card-title mb-0">Add New Bot</h5>
+            </div>
+            <div class="card-body">
+                <form action="/add_telegram_bot" method="post">
+                    <div class="row g-3">
+                        <div class="col-md-3">
+                            <label for="name" class="form-label">Name <span class="text-danger">*</span></label>
+                            <input type="text" class="form-control" id="name" name="name"
+                                   placeholder="e.g. Sneakers channel" required>
+                        </div>
+                        <div class="col-md-4">
+                            <label for="token" class="form-label">Bot Token <span class="text-danger">*</span></label>
+                            <input type="text" class="form-control" id="token" name="token"
+                                   placeholder="123456:ABC-..." required>
+                            <div class="form-text">Get this from BotFather</div>
+                        </div>
+                        <div class="col-md-3">
+                            <label for="chat_id" class="form-label">Chat ID <span class="text-danger">*</span></label>
+                            <input type="text" class="form-control" id="chat_id" name="chat_id"
+                                   placeholder="-1001234567890" required>
+                        </div>
+                        <div class="col-md-2 d-flex align-items-end">
+                            <button type="submit" class="btn btn-primary w-100">Add Bot</button>
+                        </div>
+                        <div class="col-md-12">
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="checkbox" id="enabled" name="enabled" checked>
+                                <label class="form-check-label" for="enabled">Enabled</label>
+                            </div>
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="checkbox" id="is_command_bot"
+                                       name="is_command_bot">
+                                <label class="form-check-label" for="is_command_bot">
+                                    Command bot (handles /add_query etc. and is the fallback for queries with no bot
+                                    selected)
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-md-12">
+        <div class="card">
+            <div class="card-header d-flex align-items-center">
+                <i class="bi bi-robot me-2 text-info"></i>
+                <h5 class="card-title mb-0">Configured Bots</h5>
+            </div>
+            <div class="card-body p-0">
+                <div class="table-responsive">
+                    <table class="table table-hover mb-0 align-middle">
+                        <thead>
+                        <tr>
+                            <th>Name</th>
+                            <th>Chat ID</th>
+                            <th>Status</th>
+                            <th>Role</th>
+                            <th>Actions</th>
+                        </tr>
+                        </thead>
+                        <tbody>
+                        {% for bot in bots %}
+                        <tr>
+                            <td><strong>{{ bot.name }}</strong></td>
+                            <td>{{ bot.chat_id }}</td>
+                            <td>
+                                {% if bot.enabled %}
+                                <span class="badge bg-success">Enabled</span>
+                                {% else %}
+                                <span class="badge bg-secondary">Disabled</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if bot.is_command_bot %}
+                                <span class="badge bg-info text-dark">Command bot</span>
+                                {% else %}
+                                <form action="/set_command_bot/{{ bot.id }}" method="post" class="d-inline">
+                                    <button type="submit" class="btn btn-sm btn-outline-info"
+                                            title="Make this the command bot">Make command bot</button>
+                                </form>
+                                {% endif %}
+                            </td>
+                            <td>
+                                <div class="btn-group" role="group">
+                                    <button type="button" class="btn btn-sm btn-outline-secondary"
+                                            data-bs-toggle="modal" data-bs-target="#editBot{{ bot.id }}">
+                                        <i class="bi bi-pencil"></i> Edit
+                                    </button>
+                                    <button type="button" class="btn btn-sm btn-outline-danger" data-bs-toggle="modal"
+                                            data-bs-target="#deleteBot{{ bot.id }}">
+                                        <i class="bi bi-trash"></i> Delete
+                                    </button>
+                                </div>
+
+                                <!-- Edit Modal -->
+                                <div class="modal fade" id="editBot{{ bot.id }}" tabindex="-1" aria-hidden="true">
+                                    <div class="modal-dialog">
+                                        <div class="modal-content">
+                                            <div class="modal-header">
+                                                <h5 class="modal-title">Edit Bot</h5>
+                                                <button type="button" class="btn-close" data-bs-dismiss="modal"
+                                                        aria-label="Close"></button>
+                                            </div>
+                                            <form action="/update_telegram_bot/{{ bot.id }}" method="post">
+                                                <div class="modal-body">
+                                                    <div class="mb-3">
+                                                        <label class="form-label">Name <span
+                                                                class="text-danger">*</span></label>
+                                                        <input type="text" class="form-control" name="name"
+                                                               value="{{ bot.name }}" required>
+                                                    </div>
+                                                    <div class="mb-3">
+                                                        <label class="form-label">Bot Token <span
+                                                                class="text-danger">*</span></label>
+                                                        <input type="text" class="form-control" name="token"
+                                                               value="{{ bot.token }}" required>
+                                                    </div>
+                                                    <div class="mb-3">
+                                                        <label class="form-label">Chat ID <span
+                                                                class="text-danger">*</span></label>
+                                                        <input type="text" class="form-control" name="chat_id"
+                                                               value="{{ bot.chat_id }}" required>
+                                                    </div>
+                                                    <div class="form-check">
+                                                        <input class="form-check-input" type="checkbox" name="enabled"
+                                                               id="enabled{{ bot.id }}"
+                                                               {% if bot.enabled %}checked{% endif %}>
+                                                        <label class="form-check-label" for="enabled{{ bot.id }}">
+                                                            Enabled</label>
+                                                    </div>
+                                                    <div class="form-check">
+                                                        <input class="form-check-input" type="checkbox"
+                                                               name="is_command_bot" id="cmd{{ bot.id }}"
+                                                               {% if bot.is_command_bot %}checked{% endif %}>
+                                                        <label class="form-check-label" for="cmd{{ bot.id }}">
+                                                            Command bot</label>
+                                                    </div>
+                                                </div>
+                                                <div class="modal-footer">
+                                                    <button type="button" class="btn btn-secondary"
+                                                            data-bs-dismiss="modal">Cancel</button>
+                                                    <button type="submit" class="btn btn-primary">Save Changes</button>
+                                                </div>
+                                            </form>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- Delete Modal -->
+                                <div class="modal fade" id="deleteBot{{ bot.id }}" tabindex="-1" aria-hidden="true">
+                                    <div class="modal-dialog">
+                                        <div class="modal-content">
+                                            <div class="modal-header">
+                                                <h5 class="modal-title">Confirm Deletion</h5>
+                                                <button type="button" class="btn-close" data-bs-dismiss="modal"
+                                                        aria-label="Close"></button>
+                                            </div>
+                                            <div class="modal-body">
+                                                Delete bot <strong>{{ bot.name }}</strong>? Queries linked only to this
+                                                bot will fall back to the command bot.
+                                            </div>
+                                            <div class="modal-footer">
+                                                <button type="button" class="btn btn-secondary"
+                                                        data-bs-dismiss="modal">Cancel</button>
+                                                <form action="/delete_telegram_bot/{{ bot.id }}" method="post"
+                                                      class="d-inline">
+                                                    <button type="submit" class="btn btn-danger">Delete</button>
+                                                </form>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </td>
+                        </tr>
+                        {% else %}
+                        <tr>
+                            <td colspan="5" class="text-center">No bots configured yet</td>
+                        </tr>
+                        {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

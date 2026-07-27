@@ -3,8 +3,9 @@ eBay search-URL scraper (no API key needed).
 
 Fetches an ebay.de/ebay.com search URL (/sch/i.html?...) and parses the result
 cards from the HTML. eBay blocks plain HTTP clients via TLS fingerprinting, so
-this module uses curl_cffi with browser impersonation. Requests go directly to
-eBay - no proxy is used (same policy as the eBay API module).
+this module uses curl_cffi with browser impersonation. Requests are routed
+through the eBay-specific proxy pool (platform="ebay") with rotation on blocks -
+important because eBay blocks datacenter IPs, so a direct connection often 403s.
 
 The search URL should be sorted by newly listed (_sop=10); core.py enforces
 this when the query is added.
@@ -18,6 +19,7 @@ from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 
 import db
+import proxies
 from logger import get_logger
 
 logger = get_logger(__name__)
@@ -26,6 +28,9 @@ logger = get_logger(__name__)
 # fingerprint-specific: at the time of writing chrome124 passes while chrome131
 # is blocked, so a single pinned profile would be fragile.
 IMPERSONATE_PROFILES = ["chrome124", "chrome120", "chrome110", "chrome131", "chrome"]
+
+# How many different eBay proxies to try before giving up on a fetch
+MAX_PROXY_ATTEMPTS = 3
 
 PRICE_RE = re.compile(r"(?P<currency>EUR|USD|GBP|CHF|\$|£)\s*(?P<amount>\d{1,3}(?:\.\d{3})*(?:,\d+)?|\d+(?:\.\d+)?)")
 DATE_RE = re.compile(r"^(\d{1,2})\.?\s*([A-Za-zÄäÖöÜü]{3})\.?\s+(\d{1,2}):(\d{2})$")
@@ -167,18 +172,51 @@ class EbayWebItem:
         return hash(("ebay", self.id))
 
 
+def _fetch_once(url, proxy_dict, timeout):
+    """
+    Try each impersonation profile once over a single proxy (or direct).
+
+    Returns:
+        str or None: The HTML body if a profile succeeded, else None
+    """
+    from curl_cffi import requests as curl_requests
+
+    for profile in IMPERSONATE_PROFILES:
+        try:
+            kwargs = {
+                "impersonate": profile,
+                "timeout": timeout,
+                "headers": {"Accept-Language": "de-DE,de;q=0.9,en;q=0.6"},
+            }
+            if proxy_dict:
+                kwargs["proxies"] = proxy_dict
+            response = curl_requests.get(url, **kwargs)
+            # Block pages are ~2KB error stubs; real result pages are >100KB
+            if response.status_code == 200 and len(response.text) > 50000:
+                logger.info(f"[ebay] page fetched with profile {profile}")
+                return response.text
+            logger.warning(
+                f"[ebay] blocked profile {profile} (HTTP {response.status_code}, {len(response.text)} bytes)"
+            )
+        except Exception as e:
+            logger.warning(f"[ebay] fetch with profile {profile} failed: {str(e)[:150]}")
+    return None
+
+
 def _fetch(url):
     """
-    Fetch an eBay page with curl_cffi browser impersonation (direct, no proxy).
+    Fetch an eBay page with curl_cffi browser impersonation, routed through the
+    eBay proxy pool. Rotates through several proxies (blacklisting failures)
+    before falling back to a direct connection.
 
     Returns:
         str: The HTML body
 
     Raises:
-        RuntimeError: If all impersonation profiles are blocked
+        RuntimeError: If curl_cffi is missing or all attempts are blocked
     """
     try:
-        from curl_cffi import requests as curl_requests
+        import curl_cffi  # noqa: F401
     except ImportError as e:
         raise RuntimeError(
             "curl_cffi is required for eBay URL scraping (pip install curl_cffi)"
@@ -187,28 +225,34 @@ def _fetch(url):
     timeout_str = db.get_parameter("request_timeout")
     timeout = int(timeout_str) if timeout_str else 10
 
-    last_status = None
-    for profile in IMPERSONATE_PROFILES:
-        try:
-            response = curl_requests.get(
-                url,
-                impersonate=profile,
-                timeout=timeout,
-                headers={"Accept-Language": "de-DE,de;q=0.9,en;q=0.6"},
-            )
-            # Block pages are ~2KB error stubs; real result pages are >100KB
-            if response.status_code == 200 and len(response.text) > 50000:
-                logger.info(f"eBay page fetched with profile {profile}")
-                return response.text
-            last_status = response.status_code
-            logger.warning(
-                f"eBay blocked profile {profile} (HTTP {response.status_code}, {len(response.text)} bytes)"
-            )
-        except Exception as e:
-            last_status = type(e).__name__
-            logger.warning(f"eBay fetch with profile {profile} failed: {str(e)[:150]}")
+    # Try up to MAX_PROXY_ATTEMPTS different eBay proxies
+    tried_direct = False
+    for attempt in range(1, MAX_PROXY_ATTEMPTS + 1):
+        proxy_dict, current_proxy = proxies.get_proxy_dict("ebay")
+        if current_proxy:
+            logger.info(f"[ebay] fetching via proxy {current_proxy} (attempt {attempt}/{MAX_PROXY_ATTEMPTS})")
+        else:
+            logger.info(f"[ebay] no proxy available, fetching directly (attempt {attempt}/{MAX_PROXY_ATTEMPTS})")
+            tried_direct = True
 
-    raise RuntimeError(f"eBay blocked all impersonation profiles (last: {last_status})")
+        html = _fetch_once(url, proxy_dict, timeout)
+        if html is not None:
+            return html
+
+        if current_proxy:
+            proxies.blacklist_proxy(current_proxy, "ebay")
+        else:
+            # No proxy available and direct failed: no point retrying direct
+            break
+
+    # Last resort: try a direct connection if we haven't yet
+    if not tried_direct:
+        logger.info("[ebay] all proxies blocked, trying a direct connection")
+        html = _fetch_once(url, None, timeout)
+        if html is not None:
+            return html
+
+    raise RuntimeError("eBay blocked all impersonation profiles (proxies and direct)")
 
 
 def parse_html(html, base_netloc="www.ebay.de"):
@@ -237,12 +281,17 @@ def search(url, nbr_items=20):
     Retrieve listings from an eBay search URL (scraper, no API).
 
     Args:
-        url (str): The ebay search URL (/sch/i.html?...), sorted by newly listed
+        url (str): The ebay search URL (/sch/i.html?...), sorted by newly listed.
+            A plain search term is also accepted and converted to an ebay.de URL.
         nbr_items (int, optional): Maximum number of items to return
 
     Returns:
         List[EbayWebItem]: Parsed listings in page order (newest first)
     """
+    if not url.startswith("http"):
+        from urllib.parse import urlencode
+
+        url = f"https://www.ebay.de/sch/i.html?{urlencode({'_nkw': url, '_sop': '10'})}"
     html = _fetch(url)
     netloc = urlparse(url).netloc or "www.ebay.de"
     items = parse_html(html, base_netloc=netloc)

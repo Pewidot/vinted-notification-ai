@@ -32,11 +32,21 @@ class LeRobot:
         from telegram.ext import ApplicationBuilder, CommandHandler
 
         try:
+            # The command bot polls for commands (/add_query etc.) and is the
+            # fallback recipient for queries without an explicit bot selection.
+            command_bot = db.get_command_bot()
+            if not command_bot:
+                logger.error("No command bot configured, telegram bot cannot start")
+                return
+            self.command_bot_id = command_bot[0]
+            self.command_token = command_bot[2]
+            self.command_chat = command_bot[3]
 
-            self.bot = Bot(db.get_parameter("telegram_token"))
-            self.app = (
-                ApplicationBuilder().token(db.get_parameter("telegram_token")).build()
-            )
+            # Cache of Bot instances keyed by token (created lazily for sending)
+            self._bots = {}
+
+            self.bot = self._get_bot(self.command_token)
+            self.app = ApplicationBuilder().token(self.command_token).build()
 
             # Create the item queue to send to telegram
             self.new_items_queue = queue
@@ -70,6 +80,14 @@ class LeRobot:
             self.app.run_polling()
         except Exception as e:
             logger.error(f"Error initializing bot: {str(e)}", exc_info=True)
+
+    def _get_bot(self, token):
+        """Get (and cache) a Bot instance for a given token."""
+        from telegram import Bot
+
+        if token not in self._bots:
+            self._bots[token] = Bot(token)
+        return self._bots[token]
 
     ### QUERIES ###
 
@@ -250,11 +268,11 @@ class LeRobot:
 
     ### TELEGRAM SPECIFIC FUNCTIONS ###
 
-    async def send_new_post(self, content, url, text, buy_url=None, buy_text=None, chat_id=None):
+    async def send_new_post(self, token, chat_id, content, url, text, buy_url=None, buy_text=None):
+        """Send a single item to one bot (by token) and chat."""
         try:
-            async with self.bot:
-                # Use the query-specific chat ID if provided, otherwise fall back to the default
-                chat_ID = str(chat_id) if chat_id else str(db.get_parameter("telegram_chat_id"))
+            bot = self._get_bot(token)
+            async with bot:
                 buttons = [[InlineKeyboardButton(text=text, url=url)]]
                 if buy_url and buy_text:
                     buttons.append([InlineKeyboardButton(text=buy_text, url=buy_url)])
@@ -264,8 +282,8 @@ class LeRobot:
                     logger.warning(f"Message content is empty for URL {url}, using fallback message")
                     content = f"New item available: {url}"
 
-                await self.bot.send_message(
-                    chat_ID,
+                await bot.send_message(
+                    chat_id,
                     content,
                     parse_mode="HTML",
                     read_timeout=40,
@@ -279,7 +297,7 @@ class LeRobot:
             )
             await asyncio.sleep(retry_after + 2)
             # Retry sending the message
-            await self.send_new_post(content, url, text, buy_url, buy_text, chat_id)
+            await self.send_new_post(token, chat_id, content, url, text, buy_url, buy_text)
         except Exception as e:
             logger.error(f"Error sending new post: {str(e)}", exc_info=True)
 
@@ -289,7 +307,10 @@ class LeRobot:
             should_update, VER, latest_version, url = core.check_version()
 
             if not should_update:
+                # Notify the command bot's chat about the available update
                 await self.send_new_post(
+                    self.command_token,
+                    self.command_chat,
                     f"Version {latest_version} is now available. Please update the bot.",
                     url,
                     "Open Github",
@@ -309,16 +330,24 @@ class LeRobot:
                         content, url, text, buy_url, buy_text = queue_item
                         query_id = None
 
-                    chat_id = None
-                    if query_id is not None:
-                        chat_id, enabled = db.get_query_telegram_settings(query_id)
-                        if not enabled:
-                            logger.debug(
-                                f"Telegram notifications disabled for query {query_id}, skipping message"
-                            )
-                            continue
+                    # Resolve which bots/chats should receive this item
+                    enabled, targets = db.get_query_telegram_targets(query_id)
+                    if not enabled:
+                        logger.debug(
+                            f"Telegram notifications disabled for query {query_id}, skipping message"
+                        )
+                        continue
+                    if not targets:
+                        logger.warning(
+                            f"No telegram bot resolved for query {query_id}, skipping message"
+                        )
+                        continue
 
-                    await self.send_new_post(content, url, text, buy_url, buy_text, chat_id)
+                    # Send to every selected bot/chat
+                    for bot_id, bot_name, token, chat_id in targets:
+                        await self.send_new_post(
+                            token, chat_id, content, url, text, buy_url, buy_text
+                        )
                 else:
                     await asyncio.sleep(0.1)
                     pass

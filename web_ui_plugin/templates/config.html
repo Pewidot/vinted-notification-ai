@@ -94,19 +94,13 @@
                                             </label>
                                         </div>
                                     </div>
-                                    <div class="mb-3">
-                                        <label for="telegram_token" class="form-label">Bot Token</label>
-                                        <input type="text" class="form-control" id="telegram_token"
-                                               name="telegram_token" value="{{ params.telegram_token }}">
-                                        <small class="form-text text-muted">Get this from BotFather</small>
-                                    </div>
-                                    <div class="mb-3">
-                                        <label for="telegram_chat_id" class="form-label">Chat ID</label>
-                                        <input type="text" class="form-control" id="telegram_chat_id"
-                                               name="telegram_chat_id" value="{{ params.telegram_chat_id }}">
-                                        <small class="form-text text-muted">The chat ID where notifications will be
-                                            sent</small>
-                                    </div>
+                                    <p class="text-muted mb-2">
+                                        Bots (tokens &amp; chats) are managed on their own page. Add one or
+                                        more bots there, then pick which bots each query notifies.
+                                    </p>
+                                    <a href="/telegram_bots" class="btn btn-outline-info btn-sm">
+                                        <i class="bi bi-robot me-1"></i> Manage Telegram Bots
+                                    </a>
                                 </div>
                             </div>
                         </div>
@@ -153,55 +147,6 @@
                         <div class="col-md-12">
                             <div class="card h-100">
                                 <div class="card-header d-flex align-items-center">
-                                    <i class="bi bi-bag me-2 text-info"></i>
-                                    <h5 class="card-title mb-0">eBay API</h5>
-                                </div>
-                                <div class="card-body">
-                                    <div class="row">
-                                        <div class="col-md-4">
-                                            <div class="mb-3">
-                                                <label for="ebay_app_id" class="form-label">App ID (Client ID)</label>
-                                                <input type="text" class="form-control" id="ebay_app_id"
-                                                       name="ebay_app_id" value="{{ params.ebay_app_id }}">
-                                                <small class="form-text text-muted">From your eBay developer account
-                                                    (developer.ebay.com), production keyset</small>
-                                            </div>
-                                        </div>
-                                        <div class="col-md-4">
-                                            <div class="mb-3">
-                                                <label for="ebay_cert_id" class="form-label">Cert ID (Client
-                                                    Secret)</label>
-                                                <input type="password" class="form-control" id="ebay_cert_id"
-                                                       name="ebay_cert_id" value="{{ params.ebay_cert_id }}">
-                                                <small class="form-text text-muted">Used for the OAuth
-                                                    client-credentials flow</small>
-                                            </div>
-                                        </div>
-                                        <div class="col-md-4">
-                                            <div class="mb-3">
-                                                <label for="ebay_marketplace" class="form-label">Marketplace</label>
-                                                <select class="form-select" id="ebay_marketplace"
-                                                        name="ebay_marketplace">
-                                                    {% for mp in ['EBAY_DE', 'EBAY_AT', 'EBAY_CH', 'EBAY_FR', 'EBAY_IT', 'EBAY_ES', 'EBAY_NL', 'EBAY_BE', 'EBAY_PL', 'EBAY_GB', 'EBAY_US'] %}
-                                                    <option value="{{ mp }}"
-                                                            {% if params.ebay_marketplace == mp or (not params.ebay_marketplace and mp == 'EBAY_DE') %}selected{% endif %}>
-                                                        {{ mp }}
-                                                    </option>
-                                                    {% endfor %}
-                                                </select>
-                                                <small class="form-text text-muted">eBay searches use the official API
-                                                    directly - no proxy</small>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="row mb-4">
-                        <div class="col-md-12">
-                            <div class="card h-100">
-                                <div class="card-header d-flex align-items-center">
                                     <i class="bi bi-shield-lock me-2 text-info"></i>
                                     <h5 class="card-title mb-0">Proxy Settings</h5>
                                 </div>
@@ -224,20 +169,43 @@
                                                         working before using them</small>
                                                 </div>
                                             </div>
-                                            <div class="mb-3">
-                                                <label for="proxy_list" class="form-label">Proxy List</label>
-                                                <textarea class="form-control" id="proxy_list" name="proxy_list"
-                                                          rows="3">{{ params.proxy_list }}</textarea>
-                                                <small class="form-text text-muted">List of proxies separated by
-                                                    semicolons (;)<br>
-                                                    Format: http://ip:port or ip:port</small>
-                                            </div>
-                                            <div class="mb-3">
-                                                <label for="proxy_list_link" class="form-label">Proxy List Link</label>
-                                                <input type="text" class="form-control" id="proxy_list_link"
-                                                       name="proxy_list_link" value="{{ params.proxy_list_link }}">
-                                                <small class="form-text text-muted">URL to fetch proxies from (one proxy
-                                                    per line)</small>
+                                            <p class="text-muted mb-3">
+                                                Each platform uses its own proxy list, validated against that
+                                                platform's own site. Format: <code>http://ip:port</code> or
+                                                <code>ip:port</code>, multiple proxies separated by semicolons
+                                                (;). The list link fetches proxies (one per line).
+                                            </p>
+                                            <ul class="nav nav-tabs mb-3" role="tablist">
+                                                {% for plat, label in [('vinted', 'Vinted'), ('kleinanzeigen', 'Kleinanzeigen'), ('ebay', 'eBay')] %}
+                                                <li class="nav-item" role="presentation">
+                                                    <button class="nav-link {% if loop.first %}active{% endif %}"
+                                                            id="proxytab-{{ plat }}-btn" data-bs-toggle="tab"
+                                                            data-bs-target="#proxytab-{{ plat }}" type="button"
+                                                            role="tab">{{ label }}</button>
+                                                </li>
+                                                {% endfor %}
+                                            </ul>
+                                            <div class="tab-content">
+                                                {% for plat, label in [('vinted', 'Vinted'), ('kleinanzeigen', 'Kleinanzeigen'), ('ebay', 'eBay')] %}
+                                                <div class="tab-pane fade {% if loop.first %}show active{% endif %}"
+                                                     id="proxytab-{{ plat }}" role="tabpanel">
+                                                    <div class="mb-3">
+                                                        <label for="proxy_list_{{ plat }}" class="form-label">{{ label }}
+                                                            Proxy List</label>
+                                                        <textarea class="form-control" id="proxy_list_{{ plat }}"
+                                                                  name="proxy_list_{{ plat }}"
+                                                                  rows="3">{{ params['proxy_list_' + plat] }}</textarea>
+                                                    </div>
+                                                    <div class="mb-3">
+                                                        <label for="proxy_list_link_{{ plat }}" class="form-label">{{ label }}
+                                                            Proxy List Link</label>
+                                                        <input type="text" class="form-control"
+                                                               id="proxy_list_link_{{ plat }}"
+                                                               name="proxy_list_link_{{ plat }}"
+                                                               value="{{ params['proxy_list_link_' + plat] }}">
+                                                    </div>
+                                                </div>
+                                                {% endfor %}
                                             </div>
                                         </div>
                                     </div>

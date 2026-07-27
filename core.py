@@ -14,9 +14,9 @@ def normalize_query_for_platform(query, platform):
 
     - vinted: normalize the search URL (order flag, remove volatile params)
     - kleinanzeigen: must be a kleinanzeigen.de URL, kept as-is (pagination stripped)
-    - ebay: a plain search term (searched via the official API) or an ebay
-      search URL, which is kept and scraped directly (no API key needed).
-      The URL is normalized to sort by newly listed (_sop=10).
+    - ebay: an ebay search URL (normalized to sort by newly listed, _sop=10).
+      A plain search term is converted into an ebay.de search URL.
+      Either way the stored query is a URL that gets scraped.
 
     Args:
         query (str): The query URL or search term
@@ -37,24 +37,25 @@ def normalize_query_for_platform(query, platform):
 
     if platform == "ebay":
         query = (query or "").strip()
-        if query.startswith("http"):
-            # Search URL -> scraped directly (no API). Force newest-first
-            # sorting and strip pagination so the pipeline sees new items first.
-            parsed_url = urlparse(query)
-            if "ebay." not in parsed_url.netloc:
-                return None, "Invalid eBay URL (expected an ebay search URL, e.g. https://www.ebay.de/sch/...)."
-            query_params = parse_qs(parsed_url.query)
-            query_params["_sop"] = ["10"]
-            query_params.pop("_pgn", None)
-            new_query = urlencode(query_params, doseq=True)
-            processed = urlunparse(
-                (parsed_url.scheme, parsed_url.netloc, parsed_url.path,
-                 parsed_url.params, new_query, parsed_url.fragment)
-            )
-            return processed, None
         if not query:
-            return None, "No eBay search term provided."
-        return query, None
+            return None, "No eBay search term or URL provided."
+        if not query.startswith("http"):
+            # Plain search term -> build an ebay.de search URL from it
+            query = f"https://www.ebay.de/sch/i.html?{urlencode({'_nkw': query})}"
+        # Force newest-first sorting and strip pagination so the pipeline
+        # sees new items first.
+        parsed_url = urlparse(query)
+        if "ebay." not in parsed_url.netloc:
+            return None, "Invalid eBay URL (expected an ebay search URL, e.g. https://www.ebay.de/sch/...)."
+        query_params = parse_qs(parsed_url.query)
+        query_params["_sop"] = ["10"]
+        query_params.pop("_pgn", None)
+        new_query = urlencode(query_params, doseq=True)
+        processed = urlunparse(
+            (parsed_url.scheme, parsed_url.netloc, parsed_url.path,
+             parsed_url.params, new_query, parsed_url.fragment)
+        )
+        return processed, None
 
     if platform != "vinted":
         return None, f"Unknown platform: {platform}"
@@ -62,7 +63,7 @@ def normalize_query_for_platform(query, platform):
     return None, None  # vinted is normalized by the caller (process_query/process_update_query)
 
 
-def process_query(query, name=None, telegram_chat_id=None, platform="vinted"):
+def process_query(query, name=None, telegram_chat_id=None, platform="vinted", bot_ids=None):
     """
     Process a query for the given platform and add it to the database.
 
@@ -96,7 +97,10 @@ def process_query(query, name=None, telegram_chat_id=None, platform="vinted"):
             return error, False
         if db.is_query_in_db(processed_query) is True:
             return "Query already exists.", False
-        db.add_query_to_db(processed_query, name, telegram_chat_id, platform)
+        new_id = db.add_query_to_db(processed_query, name, telegram_chat_id, platform)
+        # Link the selected telegram bots (if any)
+        if new_id is not None and bot_ids is not None:
+            db.set_query_bots(new_id, bot_ids)
         return "Query added.", True
 
     # Check if the URL is a brand URL (format: url/brand/id-name)
@@ -150,7 +154,10 @@ def process_query(query, name=None, telegram_chat_id=None, platform="vinted"):
         return "Query already exists.", False
     else:
         # add the query to the db
-        db.add_query_to_db(processed_query, name, telegram_chat_id)
+        new_id = db.add_query_to_db(processed_query, name, telegram_chat_id)
+        # Link the selected telegram bots (if any)
+        if new_id is not None and bot_ids is not None:
+            db.set_query_bots(new_id, bot_ids)
         return "Query added.", True
 
 
@@ -214,7 +221,7 @@ def process_remove_query(number):
         return "Invalid number.", False
 
 
-def process_update_query(query_id, query, name, telegram_chat_id=None):
+def process_update_query(query_id, query, name, telegram_chat_id=None, bot_ids=None):
     """
     Process the update of a query in the database.
 
@@ -222,8 +229,9 @@ def process_update_query(query_id, query, name, telegram_chat_id=None):
         query_id (int): The ID of the query to update
         query (str): The new Vinted query URL
         name (str, optional): A new name for the query. If provided, it will be used as the query name.
-        telegram_chat_id (str, optional): Query-specific Telegram chat ID.
-            If not provided, notifications go to the default chat ID.
+        telegram_chat_id (str, optional): Query-specific Telegram chat ID (legacy).
+        bot_ids (list, optional): Telegram bot ids to notify for this query.
+            If provided (even empty), the query's bot links are replaced.
 
     Returns:
         tuple: (message, success)
@@ -237,6 +245,8 @@ def process_update_query(query_id, query, name, telegram_chat_id=None):
         if error:
             return error, False
         if db.update_query_in_db(query_id, processed_query, name, telegram_chat_id):
+            if bot_ids is not None:
+                db.set_query_bots(query_id, bot_ids)
             return "Query updated.", True
         return "Failed to update query.", False
 
@@ -267,6 +277,8 @@ def process_update_query(query_id, query, name, telegram_chat_id=None):
 
     # Update the query in the database
     if db.update_query_in_db(query_id, processed_query, name, telegram_chat_id):
+        if bot_ids is not None:
+            db.set_query_bots(query_id, bot_ids)
         return "Query updated.", True
     else:
         return "Failed to update query.", False
@@ -382,7 +394,7 @@ def process_items(queue):
     for query in all_queries:
         platform = (query[6] if len(query) > 6 and query[6] else "vinted").lower()
         try:
-            logger.info(f"Processing {platform} query {query[0]}: {query[1]}")
+            logger.info(f"[{platform.upper()}] Scraping query {query[0]}: {query[1]}")
 
             # Search for items on the query's platform
             if platform == "kleinanzeigen":
@@ -390,27 +402,23 @@ def process_items(queue):
 
                 all_items = kleinanzeigen.search(query[1], nbr_items=items_per_query)
             elif platform == "ebay":
-                if query[1].startswith("http"):
-                    # Search URL -> HTML scraper (no API key needed)
-                    from scrapers import ebay_web
+                from scrapers import ebay_web
 
-                    all_items = ebay_web.search(query[1], nbr_items=items_per_query)
-                else:
-                    # Plain keyword -> official eBay API
-                    from scrapers import ebay
-
-                    all_items = ebay.search(query[1], nbr_items=items_per_query)
+                all_items = ebay_web.search(query[1], nbr_items=items_per_query)
             else:
                 all_items = vinted.items.search(query[1], nbr_items=items_per_query)
 
             # Filter to only include new items
             data = [item for item in all_items if item.is_new_item()]
 
-            logger.info(f"Scraped {len(data)} items for {platform} query: {query[1]}")
+            logger.info(
+                f"[{platform.upper()}] Found {len(data)} new item(s) "
+                f"(of {len(all_items)} scraped) for query {query[0]}"
+            )
             queue.put((data, query[0]))
 
         except Exception as e:
-            logger.error(f"Error processing query {query[0]}: {e}")
+            logger.error(f"[{platform.upper()}] Error processing query {query[0]}: {e}")
             # Put empty result on error
             queue.put(([], query[0]))
 
