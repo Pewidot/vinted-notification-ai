@@ -153,6 +153,55 @@
                         <div class="col-md-12">
                             <div class="card h-100">
                                 <div class="card-header d-flex align-items-center">
+                                    <i class="bi bi-bag me-2 text-info"></i>
+                                    <h5 class="card-title mb-0">eBay API</h5>
+                                </div>
+                                <div class="card-body">
+                                    <div class="row">
+                                        <div class="col-md-4">
+                                            <div class="mb-3">
+                                                <label for="ebay_app_id" class="form-label">App ID (Client ID)</label>
+                                                <input type="text" class="form-control" id="ebay_app_id"
+                                                       name="ebay_app_id" value="{{ params.ebay_app_id }}">
+                                                <small class="form-text text-muted">From your eBay developer account
+                                                    (developer.ebay.com), production keyset</small>
+                                            </div>
+                                        </div>
+                                        <div class="col-md-4">
+                                            <div class="mb-3">
+                                                <label for="ebay_cert_id" class="form-label">Cert ID (Client
+                                                    Secret)</label>
+                                                <input type="password" class="form-control" id="ebay_cert_id"
+                                                       name="ebay_cert_id" value="{{ params.ebay_cert_id }}">
+                                                <small class="form-text text-muted">Used for the OAuth
+                                                    client-credentials flow</small>
+                                            </div>
+                                        </div>
+                                        <div class="col-md-4">
+                                            <div class="mb-3">
+                                                <label for="ebay_marketplace" class="form-label">Marketplace</label>
+                                                <select class="form-select" id="ebay_marketplace"
+                                                        name="ebay_marketplace">
+                                                    {% for mp in ['EBAY_DE', 'EBAY_AT', 'EBAY_CH', 'EBAY_FR', 'EBAY_IT', 'EBAY_ES', 'EBAY_NL', 'EBAY_BE', 'EBAY_PL', 'EBAY_GB', 'EBAY_US'] %}
+                                                    <option value="{{ mp }}"
+                                                            {% if params.ebay_marketplace == mp or (not params.ebay_marketplace and mp == 'EBAY_DE') %}selected{% endif %}>
+                                                        {{ mp }}
+                                                    </option>
+                                                    {% endfor %}
+                                                </select>
+                                                <small class="form-text text-muted">eBay searches use the official API
+                                                    directly - no proxy</small>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="row mb-4">
+                        <div class="col-md-12">
+                            <div class="card h-100">
+                                <div class="card-header d-flex align-items-center">
                                     <i class="bi bi-shield-lock me-2 text-info"></i>
                                     <h5 class="card-title mb-0">Proxy Settings</h5>
                                 </div>

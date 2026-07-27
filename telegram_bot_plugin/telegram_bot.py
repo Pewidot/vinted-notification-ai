@@ -250,10 +250,11 @@ class LeRobot:
 
     ### TELEGRAM SPECIFIC FUNCTIONS ###
 
-    async def send_new_post(self, content, url, text, buy_url=None, buy_text=None):
+    async def send_new_post(self, content, url, text, buy_url=None, buy_text=None, chat_id=None):
         try:
             async with self.bot:
-                chat_ID = str(db.get_parameter("telegram_chat_id"))
+                # Use the query-specific chat ID if provided, otherwise fall back to the default
+                chat_ID = str(chat_id) if chat_id else str(db.get_parameter("telegram_chat_id"))
                 buttons = [[InlineKeyboardButton(text=text, url=url)]]
                 if buy_url and buy_text:
                     buttons.append([InlineKeyboardButton(text=buy_text, url=buy_url)])
@@ -278,7 +279,7 @@ class LeRobot:
             )
             await asyncio.sleep(retry_after + 2)
             # Retry sending the message
-            await self.send_new_post(content, url, text, buy_url, buy_text)
+            await self.send_new_post(content, url, text, buy_url, buy_text, chat_id)
         except Exception as e:
             logger.error(f"Error sending new post: {str(e)}", exc_info=True)
 
@@ -300,8 +301,24 @@ class LeRobot:
         try:
             while 1:
                 if not self.new_items_queue.empty():
-                    content, url, text, buy_url, buy_text = self.new_items_queue.get()
-                    await self.send_new_post(content, url, text, buy_url, buy_text)
+                    queue_item = self.new_items_queue.get()
+                    # Older queue entries may not carry a query_id
+                    if len(queue_item) == 6:
+                        content, url, text, buy_url, buy_text, query_id = queue_item
+                    else:
+                        content, url, text, buy_url, buy_text = queue_item
+                        query_id = None
+
+                    chat_id = None
+                    if query_id is not None:
+                        chat_id, enabled = db.get_query_telegram_settings(query_id)
+                        if not enabled:
+                            logger.debug(
+                                f"Telegram notifications disabled for query {query_id}, skipping message"
+                            )
+                            continue
+
+                    await self.send_new_post(content, url, text, buy_url, buy_text, chat_id)
                 else:
                     await asyncio.sleep(0.1)
                     pass

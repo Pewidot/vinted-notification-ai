@@ -8,26 +8,87 @@ from logger import get_logger
 logger = get_logger(__name__)
 
 
-def process_query(query, name=None):
+def normalize_query_for_platform(query, platform):
     """
-    Process a Vinted query URL by:
+    Validate and normalize a query for the given platform.
+
+    - vinted: normalize the search URL (order flag, remove volatile params)
+    - kleinanzeigen: must be a kleinanzeigen.de URL, kept as-is (pagination stripped)
+    - ebay: a plain search term, or an ebay search URL from which the
+      keyword (_nkw parameter) is extracted
+
+    Args:
+        query (str): The query URL or search term
+        platform (str): 'vinted', 'kleinanzeigen' or 'ebay'
+
+    Returns:
+        tuple: (processed_query, error_message)
+            - processed_query (str or None): The normalized query, None on error
+            - error_message (str or None): Error description if invalid
+    """
+    platform = (platform or "vinted").lower()
+
+    if platform == "kleinanzeigen":
+        parsed_url = urlparse(query)
+        if "kleinanzeigen." not in parsed_url.netloc:
+            return None, "Invalid Kleinanzeigen URL (expected a kleinanzeigen.de search URL)."
+        return query, None
+
+    if platform == "ebay":
+        query = (query or "").strip()
+        if query.startswith("http"):
+            parsed_url = urlparse(query)
+            keyword = parse_qs(parsed_url.query).get("_nkw", [None])[0]
+            if not keyword:
+                return None, "Invalid eBay URL (no _nkw search term found). Enter a plain search term instead."
+            return keyword, None
+        if not query:
+            return None, "No eBay search term provided."
+        return query, None
+
+    if platform != "vinted":
+        return None, f"Unknown platform: {platform}"
+
+    return None, None  # vinted is normalized by the caller (process_query/process_update_query)
+
+
+def process_query(query, name=None, telegram_chat_id=None, platform="vinted"):
+    """
+    Process a query for the given platform and add it to the database.
+
+    For Vinted URLs:
     1. Checking if the URL is a brand URL and converting it to standard format if needed
     2. Parsing the URL and extracting query parameters
     3. Ensuring the order flag is set to "newest_first"
     4. Removing time and search_id parameters
     5. Rebuilding the query string and URL
-    6. Checking if the query already exists in the database
-    7. Adding the query to the database if it doesn't exist
+
+    For Kleinanzeigen: the search URL is validated and stored as-is.
+    For eBay: a plain search term (or the _nkw param of an ebay search URL) is stored.
 
     Args:
-        query (str): The Vinted query URL
+        query (str): The query URL (vinted/kleinanzeigen) or search term (ebay)
         name (str, optional): A name for the query. If provided, it will be used as the query name.
+        telegram_chat_id (str, optional): Query-specific Telegram chat ID.
+            If not provided, notifications go to the default chat ID.
+        platform (str, optional): 'vinted', 'kleinanzeigen' or 'ebay'. Defaults to 'vinted'.
 
     Returns:
         tuple: (message, is_new_query)
             - message (str): Status message
             - is_new_query (bool): True if query was added, False if it already existed
     """
+    platform = (platform or "vinted").lower()
+
+    if platform != "vinted":
+        processed_query, error = normalize_query_for_platform(query, platform)
+        if error:
+            return error, False
+        if db.is_query_in_db(processed_query) is True:
+            return "Query already exists.", False
+        db.add_query_to_db(processed_query, name, telegram_chat_id, platform)
+        return "Query added.", True
+
     # Check if the URL is a brand URL (format: url/brand/id-name)
     parsed_url = urlparse(query)
     path_parts = parsed_url.path.strip("/").split("/")
@@ -79,7 +140,7 @@ def process_query(query, name=None):
         return "Query already exists.", False
     else:
         # add the query to the db
-        db.add_query_to_db(processed_query, name)
+        db.add_query_to_db(processed_query, name, telegram_chat_id)
         return "Query added.", True
 
 
@@ -103,9 +164,9 @@ def get_formatted_query_list():
             else query_params.get("search_text", [None])[0]
         )
 
-        if query_name[0] is None:
+        if query_name is None:
             # Use query text instead of the whole query object
-            queries_keywords.append([query[1]])
+            queries_keywords.append(query[1])
         else:
             queries_keywords.append(query_name)
 
@@ -140,7 +201,7 @@ def process_remove_query(number):
         return "Invalid number.", False
 
 
-def process_update_query(query_id, query, name):
+def process_update_query(query_id, query, name, telegram_chat_id=None):
     """
     Process the update of a query in the database.
 
@@ -148,12 +209,24 @@ def process_update_query(query_id, query, name):
         query_id (int): The ID of the query to update
         query (str): The new Vinted query URL
         name (str, optional): A new name for the query. If provided, it will be used as the query name.
+        telegram_chat_id (str, optional): Query-specific Telegram chat ID.
+            If not provided, notifications go to the default chat ID.
 
     Returns:
         tuple: (message, success)
             - message (str): Status message
             - success (bool): True if query was updated successfully
     """
+    # Non-vinted queries are not URL-normalized, only validated
+    platform = db.get_query_platform(query_id)
+    if platform != "vinted":
+        processed_query, error = normalize_query_for_platform(query, platform)
+        if error:
+            return error, False
+        if db.update_query_in_db(query_id, processed_query, name, telegram_chat_id):
+            return "Query updated.", True
+        return "Failed to update query.", False
+
     # Parse the URL and extract the query parameters
     parsed_url = urlparse(query)
     query_params = parse_qs(parsed_url.query)
@@ -180,7 +253,7 @@ def process_update_query(query_id, query, name):
     )
 
     # Update the query in the database
-    if db.update_query_in_db(query_id, processed_query, name):
+    if db.update_query_in_db(query_id, processed_query, name, telegram_chat_id):
         return "Query updated.", True
     else:
         return "Failed to update query.", False
@@ -294,16 +367,26 @@ def process_items(queue):
     vinted = Vinted()
 
     for query in all_queries:
+        platform = (query[6] if len(query) > 6 and query[6] else "vinted").lower()
         try:
-            logger.info(f"Processing query {query[0]}: {query[1]}")
+            logger.info(f"Processing {platform} query {query[0]}: {query[1]}")
 
-            # Search for items
-            all_items = vinted.items.search(query[1], nbr_items=items_per_query)
+            # Search for items on the query's platform
+            if platform == "kleinanzeigen":
+                from scrapers import kleinanzeigen
+
+                all_items = kleinanzeigen.search(query[1], nbr_items=items_per_query)
+            elif platform == "ebay":
+                from scrapers import ebay
+
+                all_items = ebay.search(query[1], nbr_items=items_per_query)
+            else:
+                all_items = vinted.items.search(query[1], nbr_items=items_per_query)
 
             # Filter to only include new items
             data = [item for item in all_items if item.is_new_item()]
 
-            logger.info(f"Scraped {len(data)} items for query: {query[1]}")
+            logger.info(f"Scraped {len(data)} items for {platform} query: {query[1]}")
             queue.put((data, query[0]))
 
         except Exception as e:
@@ -336,7 +419,8 @@ def clear_item_queue(items_queue, new_items_queue):
                 pass
             # If there's an allowlist and
             # If the user's country is not in the allowlist, we just update the timestamp
-            elif db.get_allowlist() != 0 and (
+            # (country lookup only exists for Vinted items)
+            elif getattr(item, "platform", "vinted") == "vinted" and db.get_allowlist() != 0 and (
                 get_user_country(item.raw_data["user"]["id"])
             ) not in (db.get_allowlist() + ["XX"]):
                 db.update_last_timestamp(query_id, item.raw_timestamp)
@@ -371,9 +455,9 @@ def clear_item_queue(items_queue, new_items_queue):
                     logger.warning(f"Generated content is empty for item {item.id}, using minimal fallback")
                     content = f"New item: {item.title or 'Unknown'}"
 
-                # add the item to the queue
-                new_items_queue.put((content, item.url, "Open Vinted", None, None))
-                # new_items_queue.put((content, item.url, "Open Vinted", item.buy_url, "Open buy page"))
+                # add the item to the queue (query_id lets the telegram bot pick the right chat)
+                new_items_queue.put((content, item.url, "Open Vinted", None, None, query_id))
+                # new_items_queue.put((content, item.url, "Open Vinted", item.buy_url, "Open buy page", query_id))
                 # Add the item to the db
                 db.add_item_to_db(
                     id=item.id,
@@ -383,6 +467,7 @@ def clear_item_queue(items_queue, new_items_queue):
                     photo_url=item.photo,
                     query_id=query_id,
                     currency=item.currency,
+                    url=item.url,
                 )
 
 

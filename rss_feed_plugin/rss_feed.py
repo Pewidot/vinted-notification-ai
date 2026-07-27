@@ -44,7 +44,8 @@ class RSSFeed:
     def check_rss_queue(self):
         if not self.queue.empty():
             try:
-                content, url, text, buy_url, buy_text = self.queue.get()
+                # The queue item may contain a trailing query_id (used by the telegram plugin)
+                content, url = self.queue.get()[:2]
 
                 # Add item to the feed
                 self.add_item_to_feed(content, url)

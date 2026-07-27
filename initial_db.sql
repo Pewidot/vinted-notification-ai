@@ -13,7 +13,10 @@ CREATE TABLE IF NOT EXISTS queries
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
     query     TEXT,
     last_item NUMERIC,
-    query_name TEXT
+    query_name TEXT,
+    telegram_chat_id TEXT,
+    telegram_enabled INTEGER DEFAULT 1,
+    platform TEXT DEFAULT 'vinted'
 );
 
 -- Items table
@@ -26,6 +29,7 @@ CREATE TABLE IF NOT EXISTS items
     timestamp NUMERIC,
     photo_url TEXT,
     query_id  INTEGER,
+    url       TEXT,
     FOREIGN KEY (query_id) REFERENCES queries (id)
 );
 
@@ -57,7 +61,11 @@ VALUES ('telegram_enabled', 'False'),
        ('rss_max_items', '100'),
        ('rss_process_running', 'False'),
 
-       ('version', '1.0.5.6'),
+       ('ebay_app_id', ''),
+       ('ebay_cert_id', ''),
+       ('ebay_marketplace', 'EBAY_DE'),
+
+       ('version', '1.0.5.8'),
        ('github_url', 'https://github.com/Fuyucch1/Vinted-Notifications'),
 
        ('items_per_query', '20'),

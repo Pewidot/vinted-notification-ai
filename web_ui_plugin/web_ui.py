@@ -91,7 +91,11 @@ def index():
                 ),
                 "query": item[5],
                 "photo_url": item[6],
-                "url": f"{urlparse(item[5]).scheme}://{urlparse(item[5]).netloc}/items/{item[0]}",
+                "url": (
+                    item[8]
+                    if len(item) > 8 and item[8]
+                    else f"{urlparse(item[5]).scheme}://{urlparse(item[5]).netloc}/items/{item[0]}"
+                ),
             }
         )
 
@@ -118,7 +122,11 @@ def index():
             ),
             "query": last_item[5],
             "photo_url": last_item[6],
-            "url": f"{urlparse(last_item[5]).scheme}://{urlparse(last_item[5]).netloc}/items/{last_item[0]}"
+            "url": (
+                last_item[7]
+                if len(last_item) > 7 and last_item[7]
+                else f"{urlparse(last_item[5]).scheme}://{urlparse(last_item[5]).netloc}/items/{last_item[0]}"
+            ),
         }
     else:
         stats["last_item"] = None
@@ -169,6 +177,9 @@ def queries():
                 "query": query[1],
                 "display": query_name if query_name else query[1],
                 "last_found_item": last_found_item,
+                "telegram_chat_id": query[4] if query[4] else "",
+                "telegram_enabled": True if query[5] is None else bool(query[5]),
+                "platform": (query[6] if len(query) > 6 and query[6] else "vinted"),
             }
         )
 
@@ -179,9 +190,16 @@ def queries():
 def add_query():
     query = request.form.get("query")
     query_name = request.form.get("query_name", "").strip()
+    telegram_chat_id = request.form.get("telegram_chat_id", "").strip()
+    platform = request.form.get("platform", "vinted").strip().lower()
+    if platform not in ("vinted", "kleinanzeigen", "ebay"):
+        platform = "vinted"
     if query:
         message, is_new_query = core.process_query(
-            query, name=query_name if query_name != "" else None
+            query,
+            name=query_name if query_name != "" else None,
+            telegram_chat_id=telegram_chat_id if telegram_chat_id != "" else None,
+            platform=platform,
         )
         if is_new_query:
             flash(f"Query added: {query}", "success")
@@ -219,10 +237,14 @@ def remove_all_queries():
 def update_query(query_id):
     query = request.form.get("query")
     query_name = request.form.get("query_name", "").strip()
+    telegram_chat_id = request.form.get("telegram_chat_id", "").strip()
 
     if query:
         message, success = core.process_update_query(
-            query_id, query, name=query_name if query_name != "" else None
+            query_id,
+            query,
+            name=query_name if query_name != "" else None,
+            telegram_chat_id=telegram_chat_id if telegram_chat_id != "" else None,
         )
         if success:
             flash("Query updated", "success")
@@ -230,6 +252,20 @@ def update_query(query_id):
             flash(message, "error")
     else:
         flash("No query provided", "error")
+
+    return redirect(url_for("queries"))
+
+
+@app.route("/toggle_query_telegram/<int:query_id>", methods=["POST"])
+def toggle_query_telegram(query_id):
+    _, enabled = db.get_query_telegram_settings(query_id)
+    if db.set_query_telegram_enabled(query_id, not enabled):
+        if enabled:
+            flash("Telegram notifications disabled for this query", "success")
+        else:
+            flash("Telegram notifications enabled for this query", "success")
+    else:
+        flash("Failed to update query", "error")
 
     return redirect(url_for("queries"))
 
@@ -268,7 +304,11 @@ def items():
                     if parse_qs(urlparse(item[5]).query).get("search_text", [None])[0]
                     else item[5]
                 ),
-                "url": f"{urlparse(item[5]).scheme}://{urlparse(item[5]).netloc}/items/{item[0]}",
+                "url": (
+                    item[8]
+                    if len(item) > 8 and item[8]
+                    else f"{urlparse(item[5]).scheme}://{urlparse(item[5]).netloc}/items/{item[0]}"
+                ),
                 "photo_url": item[6],
             }
         )
@@ -314,6 +354,12 @@ def update_config():
     db.set_parameter("telegram_enabled", str(telegram_enabled))
     db.set_parameter("telegram_token", request.form.get("telegram_token", ""))
     db.set_parameter("telegram_chat_id", request.form.get("telegram_chat_id", ""))
+
+    # Update eBay API parameters
+    db.set_parameter("ebay_app_id", request.form.get("ebay_app_id", "").strip())
+    db.set_parameter("ebay_cert_id", request.form.get("ebay_cert_id", "").strip())
+    ebay_marketplace = request.form.get("ebay_marketplace", "EBAY_DE").strip() or "EBAY_DE"
+    db.set_parameter("ebay_marketplace", ebay_marketplace)
 
     # Update RSS parameters
     rss_enabled = "rss_enabled" in request.form

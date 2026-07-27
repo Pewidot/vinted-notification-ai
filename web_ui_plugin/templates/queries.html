@@ -18,24 +18,33 @@
                 <form action="/add_query" method="post">
                     <div class="row g-3">
 
-                        <!-- Vinted URL (required) -->
-                        <div class="col-md-7">
-                            <label for="query" class="form-label">Vinted search URL <span
+                        <!-- Platform -->
+                        <div class="col-md-2">
+                            <label for="platform" class="form-label">Platform</label>
+                            <select class="form-select" id="platform" name="platform">
+                                <option value="vinted" selected>Vinted</option>
+                                <option value="kleinanzeigen">Kleinanzeigen</option>
+                                <option value="ebay">eBay</option>
+                            </select>
+                        </div>
+
+                        <!-- Search URL / term (required) -->
+                        <div class="col-md-4">
+                            <label for="query" class="form-label"><span id="query-label">Vinted search URL</span> <span
                                     class="text-danger">*</span></label>
-                            <input type="url"
+                            <input type="text"
                                    class="form-control"
                                    id="query"
                                    name="query"
                                    placeholder="https://www.vinted.fr/catalog?search_text=nike+shoes"
-                                   required
-                                   pattern="^https?:\/\/(?:www\.)?vinted\.[a-z]{2,}(?:\.[a-z]{2,})*(\/.*)?$">
-                            <div class="form-text">
+                                   required>
+                            <div class="form-text" id="query-help">
                                 Paste a valid Vinted search URL (e.g.&nbsp;`https://www.vinted.fr/catalog?...`)
                             </div>
                         </div>
 
                         <!-- Name (optional) -->
-                        <div class="col-md-3">
+                        <div class="col-md-2">
                             <label for="query_name" class="form-label">Name&nbsp;<span
                                     class="text-muted">(optional)</span></label>
                             <input type="text"
@@ -43,6 +52,20 @@
                                    id="query_name"
                                    name="query_name"
                                    placeholder="My search">
+                        </div>
+
+                        <!-- Telegram chat ID (optional) -->
+                        <div class="col-md-2">
+                            <label for="telegram_chat_id" class="form-label">Telegram chat ID&nbsp;<span
+                                    class="text-muted">(optional)</span></label>
+                            <input type="text"
+                                   class="form-control"
+                                   id="telegram_chat_id"
+                                   name="telegram_chat_id"
+                                   placeholder="Default chat ID">
+                            <div class="form-text">
+                                Leave empty to use the default chat ID
+                            </div>
                         </div>
 
                         <div class="col-md-2 d-flex align-items-center">
@@ -70,6 +93,7 @@
                             <th>#</th>
                             <th>Query</th>
                             <th>Last Found Item</th>
+                            <th>Telegram Chat</th>
                             <th>Actions</th>
                         </tr>
                         </thead>
@@ -77,10 +101,45 @@
                         {% for query in queries %}
                         <tr>
                             <td>{{ query.id }}</td>
-                            <td>{{ query.display }}</td>
+                            <td>
+                                {% if query.platform == 'kleinanzeigen' %}
+                                <span class="badge bg-warning text-dark">Kleinanzeigen</span>
+                                {% elif query.platform == 'ebay' %}
+                                <span class="badge bg-primary">eBay</span>
+                                {% else %}
+                                <span class="badge bg-success">Vinted</span>
+                                {% endif %}
+                                {{ query.display }}
+                            </td>
                             <td>{{ query.last_found_item }}</td>
                             <td>
+                                {% if query.telegram_chat_id %}
+                                <span class="badge bg-info text-dark">{{ query.telegram_chat_id }}</span>
+                                {% else %}
+                                <span class="badge bg-secondary">Default</span>
+                                {% endif %}
+                                {% if query.telegram_enabled %}
+                                <span class="badge bg-success">Active</span>
+                                {% else %}
+                                <span class="badge bg-danger">Inactive</span>
+                                {% endif %}
+                            </td>
+                            <td>
                                 <div class="btn-group" role="group">
+                                    <form action="/toggle_query_telegram/{{ query.query_id }}" method="post"
+                                          class="d-inline">
+                                        {% if query.telegram_enabled %}
+                                        <button type="submit" class="btn btn-sm btn-outline-warning"
+                                                title="Disable Telegram notifications for this query">
+                                            <i class="bi bi-bell-slash"></i> Disable Chat
+                                        </button>
+                                        {% else %}
+                                        <button type="submit" class="btn btn-sm btn-outline-success"
+                                                title="Enable Telegram notifications for this query">
+                                            <i class="bi bi-bell"></i> Enable Chat
+                                        </button>
+                                        {% endif %}
+                                    </form>
                                     <a href="/items?query={{ query.query_id }}"
                                        class="btn btn-sm btn-outline-primary">
                                         <i class="bi bi-box"></i> View Items
@@ -110,16 +169,17 @@
                                             <form action="/update_query/{{ query.query_id }}" method="post">
                                                 <div class="modal-body">
                                                     <div class="mb-3">
-                                                        <label for="query{{ query.id }}" class="form-label">Vinted
-                                                            search URL <span class="text-danger">*</span></label>
-                                                        <input type="url"
+                                                        <label for="query{{ query.id }}" class="form-label">
+                                                            {% if query.platform == 'ebay' %}eBay search term
+                                                            {% elif query.platform == 'kleinanzeigen' %}Kleinanzeigen search URL
+                                                            {% else %}Vinted search URL{% endif %}
+                                                            <span class="text-danger">*</span></label>
+                                                        <input type="text"
                                                                class="form-control"
                                                                id="query{{ query.id }}"
                                                                name="query"
                                                                value="{{ query.query }}"
-                                                               placeholder="https://www.vinted.fr/catalog?search_text=nike+shoes"
-                                                               required
-                                                               pattern="^https?:\/\/(?:www\.)?vinted\.[a-z]{2,}(?:\.[a-z]{2,})*(\/.*)?$">
+                                                               required>
                                                     </div>
                                                     <div class="mb-3">
                                                         <label for="query_name{{ query.id }}" class="form-label">Name
@@ -131,6 +191,20 @@
                                                                value="{{ query.display if query.display != query.query else '' }}"
                                                                required
                                                                placeholder="My search">
+                                                    </div>
+                                                    <div class="mb-3">
+                                                        <label for="telegram_chat_id{{ query.id }}"
+                                                               class="form-label">Telegram chat ID
+                                                            <span class="text-muted">(optional)</span></label>
+                                                        <input type="text"
+                                                               class="form-control"
+                                                               id="telegram_chat_id{{ query.id }}"
+                                                               name="telegram_chat_id"
+                                                               value="{{ query.telegram_chat_id }}"
+                                                               placeholder="Default chat ID">
+                                                        <div class="form-text">
+                                                            Leave empty to use the default chat ID
+                                                        </div>
                                                     </div>
                                                 </div>
                                                 <div class="modal-footer">
@@ -176,7 +250,7 @@
                         </tr>
                         {% else %}
                         <tr>
-                            <td colspan="4" class="text-center">No queries found</td>
+                            <td colspan="5" class="text-center">No queries found</td>
                         </tr>
                         {% endfor %}
                         </tbody>
@@ -217,4 +291,40 @@
         </div>
     </div>
 </div>
+
+<script>
+    (function () {
+        const platformSelect = document.getElementById('platform');
+        const queryInput = document.getElementById('query');
+        const queryLabel = document.getElementById('query-label');
+        const queryHelp = document.getElementById('query-help');
+
+        const platformConfig = {
+            vinted: {
+                label: 'Vinted search URL',
+                placeholder: 'https://www.vinted.fr/catalog?search_text=nike+shoes',
+                help: 'Paste a valid Vinted search URL (e.g. https://www.vinted.fr/catalog?...)'
+            },
+            kleinanzeigen: {
+                label: 'Kleinanzeigen search URL',
+                placeholder: 'https://www.kleinanzeigen.de/s-suchanfrage.html?keywords=nike',
+                help: 'Paste a Kleinanzeigen search URL (uses the shared proxy pool)'
+            },
+            ebay: {
+                label: 'eBay search term',
+                placeholder: 'nike air max 90',
+                help: 'Enter a plain search term (official eBay API, no proxy)'
+            }
+        };
+
+        if (platformSelect) {
+            platformSelect.addEventListener('change', function () {
+                const config = platformConfig[this.value] || platformConfig.vinted;
+                queryLabel.textContent = config.label;
+                queryInput.placeholder = config.placeholder;
+                queryHelp.textContent = config.help;
+            });
+        }
+    })();
+</script>
 {% endblock %}

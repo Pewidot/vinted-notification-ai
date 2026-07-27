@@ -78,15 +78,15 @@ def update_last_timestamp(query_id, timestamp):
             conn.close()
 
 
-def add_item_to_db(id, title, query_id, price, timestamp, photo_url, currency="EUR"):
+def add_item_to_db(id, title, query_id, price, timestamp, photo_url, currency="EUR", url=None):
     conn = None
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         # Insert into db the id and the query_id related to the item
         cursor.execute(
-            "INSERT INTO items (item, title, price, currency, timestamp, photo_url, query_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (id, title, price, currency, timestamp, photo_url, query_id),
+            "INSERT INTO items (item, title, price, currency, timestamp, photo_url, query_id, url) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (id, title, price, currency, timestamp, photo_url, query_id, url),
         )
         # Update the last item for the query
         cursor.execute(
@@ -105,7 +105,9 @@ def get_queries():
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("SELECT id, query, last_item, query_name FROM queries")
+        cursor.execute(
+            "SELECT id, query, last_item, query_name, telegram_chat_id, telegram_enabled, platform FROM queries"
+        )
         return cursor.fetchall()
     except Exception:
         print_exc()
@@ -135,20 +137,15 @@ def is_query_in_db(processed_query):
             conn.close()
 
 
-def add_query_to_db(query, name=None):
+def add_query_to_db(query, name=None, telegram_chat_id=None, platform="vinted"):
     conn = None
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        if name:
-            cursor.execute(
-                "INSERT INTO queries (query, last_item, query_name) VALUES (?, NULL, ?)",
-                (query, name),
-            )
-        else:
-            cursor.execute(
-                "INSERT INTO queries (query, last_item) VALUES (?, NULL)", (query,)
-            )
+        cursor.execute(
+            "INSERT INTO queries (query, last_item, query_name, telegram_chat_id, telegram_enabled, platform) VALUES (?, NULL, ?, ?, 1, ?)",
+            (query, name, telegram_chat_id, platform),
+        )
         conn.commit()
     except Exception:
         print_exc()
@@ -210,7 +207,7 @@ def remove_all_queries_from_db():
             conn.close()
 
 
-def update_query_in_db(query_id, query, name):
+def update_query_in_db(query_id, query, name, telegram_chat_id=None):
     """
     Update an existing query in the database.
 
@@ -218,6 +215,8 @@ def update_query_in_db(query_id, query, name):
         query_id (int): The ID of the query to update
         query (str): The new query URL
         name (str, optional): The new name for the query
+        telegram_chat_id (str, optional): Query-specific Telegram chat ID
+            (None/empty = use the default telegram_chat_id parameter)
 
     Returns:
         bool: True if the query was updated successfully, False otherwise
@@ -227,8 +226,98 @@ def update_query_in_db(query_id, query, name):
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute(
-            "UPDATE queries SET query=?, query_name=? WHERE id=?",
-            (query, name, query_id),
+            "UPDATE queries SET query=?, query_name=?, telegram_chat_id=? WHERE id=?",
+            (query, name, telegram_chat_id, query_id),
+        )
+        conn.commit()
+        return True
+    except Exception:
+        print_exc()
+        return False
+    finally:
+        if conn:
+            conn.close()
+
+
+def get_query_telegram_settings(query_id):
+    """
+    Get the Telegram settings for a specific query.
+
+    Args:
+        query_id (int): The ID of the query
+
+    Returns:
+        tuple: (chat_id, enabled)
+            - chat_id (str or None): Query-specific chat ID, None if not set
+            - enabled (bool): Whether Telegram notifications are enabled for this query
+    """
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT telegram_chat_id, telegram_enabled FROM queries WHERE id=?",
+            (query_id,),
+        )
+        result = cursor.fetchone()
+        if result:
+            chat_id = result[0] if result[0] else None
+            enabled = True if result[1] is None else bool(result[1])
+            return chat_id, enabled
+        return None, True
+    except Exception:
+        print_exc()
+        return None, True
+    finally:
+        if conn:
+            conn.close()
+
+
+def get_query_platform(query_id):
+    """
+    Get the platform of a query ('vinted', 'kleinanzeigen' or 'ebay').
+
+    Args:
+        query_id (int): The ID of the query
+
+    Returns:
+        str: The platform name, defaults to 'vinted'
+    """
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT platform FROM queries WHERE id=?", (query_id,))
+        result = cursor.fetchone()
+        if result and result[0]:
+            return result[0]
+        return "vinted"
+    except Exception:
+        print_exc()
+        return "vinted"
+    finally:
+        if conn:
+            conn.close()
+
+
+def set_query_telegram_enabled(query_id, enabled):
+    """
+    Enable or disable Telegram notifications for a specific query.
+
+    Args:
+        query_id (int): The ID of the query
+        enabled (bool): True to enable, False to disable
+
+    Returns:
+        bool: True if updated successfully, False otherwise
+    """
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE queries SET telegram_enabled=? WHERE id=?",
+            (1 if enabled else 0, query_id),
         )
         conn.commit()
         return True
@@ -357,7 +446,7 @@ def get_items(limit=50, query=None):
                 query_id = result[0]
                 # Get items with the matching query_id
                 cursor.execute(
-                    "SELECT i.item, i.title, i.price, i.currency, i.timestamp, q.query, i.photo_url, q.query_name FROM items i JOIN queries q ON i.query_id = q.id WHERE i.query_id=? ORDER BY i.timestamp DESC LIMIT ?",
+                    "SELECT i.item, i.title, i.price, i.currency, i.timestamp, q.query, i.photo_url, q.query_name, i.url FROM items i JOIN queries q ON i.query_id = q.id WHERE i.query_id=? ORDER BY i.timestamp DESC LIMIT ?",
                     (query_id, limit),
                 )
             else:
@@ -365,7 +454,7 @@ def get_items(limit=50, query=None):
         else:
             # Join with queries table to get the query text
             cursor.execute(
-                "SELECT i.item, i.title, i.price, i.currency, i.timestamp, q.query, i.photo_url, q.query_name FROM items i JOIN queries q ON i.query_id = q.id ORDER BY i.timestamp DESC LIMIT ?",
+                "SELECT i.item, i.title, i.price, i.currency, i.timestamp, q.query, i.photo_url, q.query_name, i.url FROM items i JOIN queries q ON i.query_id = q.id ORDER BY i.timestamp DESC LIMIT ?",
                 (limit,),
             )
         return cursor.fetchall()
@@ -413,7 +502,7 @@ def get_last_found_item():
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT i.item, i.title, i.price, i.currency, i.timestamp, q.query, i.photo_url FROM items i JOIN queries q ON i.query_id = q.id ORDER BY i.timestamp DESC LIMIT 1"
+            "SELECT i.item, i.title, i.price, i.currency, i.timestamp, q.query, i.photo_url, i.url FROM items i JOIN queries q ON i.query_id = q.id ORDER BY i.timestamp DESC LIMIT 1"
         )
         return cursor.fetchone()
     except Exception:
