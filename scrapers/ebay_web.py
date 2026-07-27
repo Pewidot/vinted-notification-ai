@@ -30,7 +30,11 @@ logger = get_logger(__name__)
 IMPERSONATE_PROFILES = ["chrome124", "chrome120", "chrome110", "chrome131", "chrome"]
 
 # How many different eBay proxies to try before giving up on a fetch
-MAX_PROXY_ATTEMPTS = 3
+MAX_PROXY_ATTEMPTS = 6
+# Cap the per-attempt timeout for eBay fetches: a proxy slower than this is not
+# worth waiting for, and a lower cap means dead proxies fail fast during rotation.
+# (Session warming downloads the homepage + a ~1.5MB search page, so allow a bit.)
+EBAY_FETCH_TIMEOUT_CAP = 12
 
 PRICE_RE = re.compile(r"(?P<currency>EUR|USD|GBP|CHF|\$|£)\s*(?P<amount>\d{1,3}(?:\.\d{3})*(?:,\d+)?|\d+(?:\.\d+)?)")
 DATE_RE = re.compile(r"^(\d{1,2})\.?\s*([A-Za-zÄäÖöÜü]{3})\.?\s+(\d{1,2}):(\d{2})$")
@@ -174,32 +178,68 @@ class EbayWebItem:
 
 def _fetch_once(url, proxy_dict, timeout):
     """
-    Try each impersonation profile once over a single proxy (or direct).
+    Fetch the eBay search page over one proxy (or direct connection) using
+    SESSION WARMING: first load the eBay homepage to obtain consent/session
+    cookies, then request the search URL within the same cookie session.
+
+    A cold search request (no cookies) is reliably answered with HTTP 403,
+    whereas a warmed session usually gets through - even on an IP that 403s
+    cold requests. (Technique adapted from a Scrapy-based eBay scraper that
+    warms cookies via a homepage request before searching.)
+
+    Rotating fingerprints only helps when eBay answered and blocked the search;
+    on a homepage block (IP-level) or a connection failure we abort this proxy
+    immediately instead of burning time on every remaining profile.
 
     Returns:
         str or None: The HTML body if a profile succeeded, else None
     """
     from curl_cffi import requests as curl_requests
 
+    parsed = urlparse(url)
+    homepage = f"{parsed.scheme}://{parsed.netloc}/"
+
     for profile in IMPERSONATE_PROFILES:
         try:
-            kwargs = {
-                "impersonate": profile,
-                "timeout": timeout,
-                "headers": {"Accept-Language": "de-DE,de;q=0.9,en;q=0.6"},
-            }
+            session = curl_requests.Session(impersonate=profile)
+            session.headers.update(
+                {
+                    "Accept-Language": "de-DE,de;q=0.9,en;q=0.6",
+                    "Upgrade-Insecure-Requests": "1",
+                }
+            )
+            req_kwargs = {"timeout": timeout}
             if proxy_dict:
-                kwargs["proxies"] = proxy_dict
-            response = curl_requests.get(url, **kwargs)
+                req_kwargs["proxies"] = proxy_dict
+
+            # 1) Warm the session: the homepage sets consent/session cookies
+            home = session.get(homepage, **req_kwargs)
+            if home.status_code != 200:
+                # A block here is IP-level - no fingerprint will help. Abort proxy.
+                logger.warning(
+                    f"[ebay] homepage warm-up blocked (HTTP {home.status_code}) via this proxy, skipping it"
+                )
+                return None
+
+            # 2) The actual search, carrying the warmed cookies
+            response = session.get(url, **req_kwargs)
             # Block pages are ~2KB error stubs; real result pages are >100KB
             if response.status_code == 200 and len(response.text) > 50000:
-                logger.info(f"[ebay] page fetched with profile {profile}")
+                logger.info(f"[ebay] page fetched with profile {profile} (session-warmed)")
                 return response.text
             logger.warning(
-                f"[ebay] blocked profile {profile} (HTTP {response.status_code}, {len(response.text)} bytes)"
+                f"[ebay] search blocked profile {profile} (HTTP {response.status_code}, {len(response.text)} bytes)"
             )
+            # Got an HTTP response on the search: a different fingerprint might
+            # get through, so keep trying the remaining profiles on this proxy.
         except Exception as e:
-            logger.warning(f"[ebay] fetch with profile {profile} failed: {str(e)[:150]}")
+            # Connection-level failure (timeout, refused, ...): the proxy is
+            # dead/unreachable. Abort - other profiles would only time out too.
+            logger.warning(
+                f"[ebay] proxy/connection failed on profile {profile}, "
+                f"skipping remaining profiles: {str(e)[:150]}"
+            )
+            return None
     return None
 
 
@@ -224,6 +264,8 @@ def _fetch(url):
 
     timeout_str = db.get_parameter("request_timeout")
     timeout = int(timeout_str) if timeout_str else 10
+    # Fail fast on slow/dead proxies during rotation
+    timeout = min(timeout, EBAY_FETCH_TIMEOUT_CAP)
 
     # Try up to MAX_PROXY_ATTEMPTS different eBay proxies
     tried_direct = False

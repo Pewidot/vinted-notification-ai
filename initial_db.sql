@@ -16,7 +16,8 @@ CREATE TABLE IF NOT EXISTS queries
     query_name TEXT,
     telegram_chat_id TEXT,
     telegram_enabled INTEGER DEFAULT 1,
-    platform TEXT DEFAULT 'vinted'
+    platform TEXT DEFAULT 'vinted',
+    active INTEGER DEFAULT 1
 );
 
 -- Items table
@@ -82,7 +83,7 @@ VALUES ('telegram_enabled', 'False'),
        ('rss_max_items', '100'),
        ('rss_process_running', 'False'),
 
-       ('version', '1.0.6.0'),
+       ('version', '1.0.6.1'),
        ('github_url', 'https://github.com/Fuyucch1/Vinted-Notifications'),
 
        ('items_per_query', '20'),

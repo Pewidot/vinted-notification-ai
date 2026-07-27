@@ -186,6 +186,7 @@ def queries():
                 "last_found_item": last_found_item,
                 "telegram_enabled": True if query[5] is None else bool(query[5]),
                 "platform": (query[6] if len(query) > 6 and query[6] else "vinted"),
+                "active": (True if len(query) <= 7 or query[7] is None else bool(query[7])),
                 "bot_ids": [b[0] for b in linked_bots],
                 "bot_names": [b[1] for b in linked_bots],
             }
@@ -266,6 +267,16 @@ def update_query(query_id):
     else:
         flash("No query provided", "error")
 
+    return redirect(url_for("queries"))
+
+
+@app.route("/toggle_query_active/<int:query_id>", methods=["POST"])
+def toggle_query_active(query_id):
+    active = db.get_query_active(query_id)
+    if db.set_query_active(query_id, not active):
+        flash("Query paused (no longer scraped)" if active else "Query resumed", "success")
+    else:
+        flash("Failed to update query", "error")
     return redirect(url_for("queries"))
 
 

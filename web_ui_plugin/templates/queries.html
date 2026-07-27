@@ -115,6 +115,9 @@
                                 {% else %}
                                 <span class="badge bg-success">Vinted</span>
                                 {% endif %}
+                                {% if not query.active %}
+                                <span class="badge bg-secondary">Paused</span>
+                                {% endif %}
                                 {{ query.display }}
                             </td>
                             <td>{{ query.last_found_item }}</td>
@@ -134,6 +137,20 @@
                             </td>
                             <td>
                                 <div class="btn-group" role="group">
+                                    <form action="/toggle_query_active/{{ query.query_id }}" method="post"
+                                          class="d-inline">
+                                        {% if query.active %}
+                                        <button type="submit" class="btn btn-sm btn-outline-secondary"
+                                                title="Pause this query (stop scraping it, keep it saved)">
+                                            <i class="bi bi-pause-circle"></i> Pause
+                                        </button>
+                                        {% else %}
+                                        <button type="submit" class="btn btn-sm btn-outline-success"
+                                                title="Resume scraping this query">
+                                            <i class="bi bi-play-circle"></i> Resume
+                                        </button>
+                                        {% endif %}
+                                    </form>
                                     <form action="/toggle_query_telegram/{{ query.query_id }}" method="post"
                                           class="d-inline">
                                         {% if query.telegram_enabled %}

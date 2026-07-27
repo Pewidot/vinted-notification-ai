@@ -106,7 +106,7 @@ def get_queries():
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT id, query, last_item, query_name, telegram_chat_id, telegram_enabled, platform FROM queries"
+            "SELECT id, query, last_item, query_name, telegram_chat_id, telegram_enabled, platform, active FROM queries"
         )
         return cursor.fetchall()
     except Exception:
@@ -273,6 +273,54 @@ def get_query_telegram_settings(query_id):
     except Exception:
         print_exc()
         return None, True
+    finally:
+        if conn:
+            conn.close()
+
+
+def set_query_active(query_id, active):
+    """
+    Activate or deactivate a query. An inactive query is kept in the database
+    but skipped entirely during scraping until reactivated.
+
+    Args:
+        query_id (int): The ID of the query
+        active (bool): True to activate, False to deactivate (pause)
+
+    Returns:
+        bool: True if updated successfully, False otherwise
+    """
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE queries SET active=? WHERE id=?", (1 if active else 0, query_id)
+        )
+        conn.commit()
+        return True
+    except Exception:
+        print_exc()
+        return False
+    finally:
+        if conn:
+            conn.close()
+
+
+def get_query_active(query_id):
+    """Return True if the query is active (default True), False if paused."""
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT active FROM queries WHERE id=?", (query_id,))
+        row = cursor.fetchone()
+        if row is None:
+            return True
+        return True if row[0] is None else bool(row[0])
+    except Exception:
+        print_exc()
+        return True
     finally:
         if conn:
             conn.close()

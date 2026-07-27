@@ -393,6 +393,11 @@ def process_items(queue):
 
     for query in all_queries:
         platform = (query[6] if len(query) > 6 and query[6] else "vinted").lower()
+        # Skip paused (inactive) queries entirely
+        active = query[7] if len(query) > 7 and query[7] is not None else 1
+        if not active:
+            logger.debug(f"[{platform.upper()}] Skipping paused query {query[0]}")
+            continue
         try:
             logger.info(f"[{platform.upper()}] Scraping query {query[0]}: {query[1]}")
 

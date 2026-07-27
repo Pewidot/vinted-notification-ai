@@ -19,7 +19,9 @@ DEFAULT_PLATFORM = "vinted"
 TEST_URLS = {
     "vinted": "https://www.vinted.de/",
     "kleinanzeigen": "https://www.kleinanzeigen.de/",
-    "ebay": "https://www.ebay.de/",
+    # A real search page: eBay proxies are validated against the same endpoint
+    # (and via curl_cffi) that the scraper actually uses.
+    "ebay": "https://www.ebay.de/sch/i.html?_nkw=test&_sop=10",
 }
 
 # Per-platform caches. Every dict is keyed by platform name.
@@ -30,8 +32,10 @@ _PROXY_BLACKLIST = {}          # {platform: {proxy: expiration_time}}
 
 # Maximum number of concurrent workers for proxy checking
 MAX_PROXY_WORKERS = 90
-# Time interval in seconds after which proxies should be rechecked (6 hours)
-PROXY_RECHECK_INTERVAL = 6 * 60 * 60
+# Time interval in seconds after which proxies should be rechecked (12 hours).
+# Within this window the validated pool is reused (also across restarts, since
+# it is persisted to the database) instead of being re-validated.
+PROXY_RECHECK_INTERVAL = 12 * 60 * 60
 # Time interval to keep a proxy in blacklist (1 hour)
 PROXY_BLACKLIST_DURATION = 60 * 60
 
@@ -267,7 +271,25 @@ def get_random_proxy(platform: str = DEFAULT_PLATFORM, exclude_blacklisted: bool
     _PROXY_CACHE_INITIALIZED[platform] = True
     logger.info(f"[{platform}] Initializing proxy cache...")
 
-    # Update the last check time in the database
+    # Reuse a recently-validated pool across restarts: if the last check for this
+    # platform was less than PROXY_RECHECK_INTERVAL (12h) ago and we have a
+    # persisted validated list, load it instead of re-fetching/re-validating.
+    if last_proxy_check_time > 0 and (current_time - last_proxy_check_time) < PROXY_RECHECK_INTERVAL:
+        persisted = db.get_parameter(_pkey("validated_proxies", platform))
+        cached = [p.strip() for p in persisted.split(";") if p.strip()] if persisted else []
+        if cached:
+            age_hours = (current_time - last_proxy_check_time) / 3600
+            logger.info(
+                f"[{platform}] Reusing {len(cached)} validated proxies from "
+                f"{age_hours:.1f}h ago (last check < {PROXY_RECHECK_INTERVAL // 3600}h, no re-validation)"
+            )
+            _PROXY_CACHE[platform] = cached
+            if len(cached) == 1:
+                _SINGLE_PROXY[platform] = cached[0]
+            available = [p for p in cached if p not in blacklist] if exclude_blacklisted else cached
+            return random.choice(available) if available else None
+
+    # Update the last check time in the database (a full (re)validation follows)
     db.set_parameter(_pkey("last_proxy_check_time", platform), str(current_time))
 
     # Initialize all_proxies list
@@ -296,8 +318,10 @@ def get_random_proxy(platform: str = DEFAULT_PLATFORM, exclude_blacklisted: bool
             working_proxies = check_proxies_parallel(all_proxies, platform)
             if working_proxies:
                 _PROXY_CACHE[platform] = working_proxies
-                # Store validated proxy count in database for stats display
+                # Store validated proxy count + list in database (list is reused
+                # across restarts within the recheck window)
                 db.set_parameter(_pkey("validated_proxy_count", platform), str(len(working_proxies)))
+                db.set_parameter(_pkey("validated_proxies", platform), ";".join(working_proxies))
                 logger.info(f"[{platform}] Stored validated_proxy_count={len(working_proxies)} in database")
                 # If there's only one working proxy, cache it separately
                 if len(working_proxies) == 1:
@@ -309,12 +333,14 @@ def get_random_proxy(platform: str = DEFAULT_PLATFORM, exclude_blacklisted: bool
                 return selected
             else:
                 logger.error(f"[{platform}] No working proxies found after validation")
-                # Store 0 count so web UI knows validation completed but found nothing
+                # Store 0 count / empty list so we don't reuse a stale pool
                 db.set_parameter(_pkey("validated_proxy_count", platform), "0")
+                db.set_parameter(_pkey("validated_proxies", platform), "")
         else:
             # If CHECK_PROXIES is False, just cache all proxies without checking them
             _PROXY_CACHE[platform] = all_proxies
             db.set_parameter(_pkey("validated_proxy_count", platform), str(len(all_proxies)))
+            db.set_parameter(_pkey("validated_proxies", platform), ";".join(all_proxies))
             logger.warning(f"[{platform}] Proxy checking is disabled, using proxies without validation")
             # If there's only one proxy, cache it separately
             if len(all_proxies) == 1:
@@ -352,6 +378,13 @@ def check_proxy(proxy: str, platform: str = DEFAULT_PLATFORM) -> bool:
 
     # Convert proxy string to dictionary format
     proxy_dict = convert_proxy_string_to_dict(proxy)
+
+    # eBay blocks plain HTTP clients via TLS fingerprinting, so a proxy that
+    # "works" with requests may still be useless for the curl_cffi scraper.
+    # Validate eBay proxies the same way we scrape: curl_cffi against a real
+    # search page, requiring a full result page (not a block stub).
+    if platform == "ebay":
+        return _check_proxy_ebay(proxy_dict)
 
     try:
         # Create a new session for testing (ensures thread safety)
@@ -404,6 +437,44 @@ def check_proxy(proxy: str, platform: str = DEFAULT_PLATFORM) -> bool:
         # Ensure the session is closed to prevent resource leaks
         if "session" in locals():
             session.close()
+
+
+def _check_proxy_ebay(proxy_dict: dict) -> bool:
+    """
+    Validate a proxy for eBay exactly the way the scraper fetches: curl_cffi
+    with session warming (load the homepage for cookies, then the search page).
+    Returns True only if a full result page comes back (200 and clearly larger
+    than a block stub). Validating with the same warmed-session method avoids
+    wrongly rejecting good proxies that only 403 on a cold request.
+    """
+    import db
+    from urllib.parse import urlparse
+
+    timeout_str = db.get_parameter("proxy_test_timeout")
+    timeout = int(timeout_str) if timeout_str else 5
+
+    try:
+        from curl_cffi import requests as curl_requests
+    except ImportError:
+        logger.warning("curl_cffi not installed, cannot validate eBay proxies")
+        return False
+
+    search_url = _get_test_url("ebay")
+    homepage = f"https://{urlparse(search_url).netloc}/"
+
+    try:
+        session = curl_requests.Session(impersonate="chrome124")
+        session.headers.update(
+            {"Accept-Language": "de-DE,de;q=0.9,en;q=0.6", "Upgrade-Insecure-Requests": "1"}
+        )
+        home = session.get(homepage, proxies=proxy_dict, timeout=timeout)
+        if home.status_code != 200:
+            return False
+        response = session.get(search_url, proxies=proxy_dict, timeout=timeout)
+        return response.status_code == 200 and len(response.text) > 50000
+    except Exception as e:
+        logger.debug(f"[ebay] proxy validation failed: {str(e)[:120]}")
+        return False
 
 
 def convert_proxy_string_to_dict(proxy: Optional[str]) -> dict:
