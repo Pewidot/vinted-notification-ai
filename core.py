@@ -14,8 +14,9 @@ def normalize_query_for_platform(query, platform):
 
     - vinted: normalize the search URL (order flag, remove volatile params)
     - kleinanzeigen: must be a kleinanzeigen.de URL, kept as-is (pagination stripped)
-    - ebay: a plain search term, or an ebay search URL from which the
-      keyword (_nkw parameter) is extracted
+    - ebay: a plain search term (searched via the official API) or an ebay
+      search URL, which is kept and scraped directly (no API key needed).
+      The URL is normalized to sort by newly listed (_sop=10).
 
     Args:
         query (str): The query URL or search term
@@ -37,11 +38,20 @@ def normalize_query_for_platform(query, platform):
     if platform == "ebay":
         query = (query or "").strip()
         if query.startswith("http"):
+            # Search URL -> scraped directly (no API). Force newest-first
+            # sorting and strip pagination so the pipeline sees new items first.
             parsed_url = urlparse(query)
-            keyword = parse_qs(parsed_url.query).get("_nkw", [None])[0]
-            if not keyword:
-                return None, "Invalid eBay URL (no _nkw search term found). Enter a plain search term instead."
-            return keyword, None
+            if "ebay." not in parsed_url.netloc:
+                return None, "Invalid eBay URL (expected an ebay search URL, e.g. https://www.ebay.de/sch/...)."
+            query_params = parse_qs(parsed_url.query)
+            query_params["_sop"] = ["10"]
+            query_params.pop("_pgn", None)
+            new_query = urlencode(query_params, doseq=True)
+            processed = urlunparse(
+                (parsed_url.scheme, parsed_url.netloc, parsed_url.path,
+                 parsed_url.params, new_query, parsed_url.fragment)
+            )
+            return processed, None
         if not query:
             return None, "No eBay search term provided."
         return query, None
@@ -157,11 +167,14 @@ def get_formatted_query_list():
         parsed_url = urlparse(query[1])
         query_params = parse_qs(parsed_url.query)
 
-        # Get the name or Extract the value of 'search_text'
+        # Get the name or extract the search term (search_text for Vinted, _nkw for eBay)
         query_name = (
             query[3]
             if query[3] is not None
-            else query_params.get("search_text", [None])[0]
+            else (
+                query_params.get("search_text", [None])[0]
+                or query_params.get("_nkw", [None])[0]
+            )
         )
 
         if query_name is None:
@@ -377,9 +390,16 @@ def process_items(queue):
 
                 all_items = kleinanzeigen.search(query[1], nbr_items=items_per_query)
             elif platform == "ebay":
-                from scrapers import ebay
+                if query[1].startswith("http"):
+                    # Search URL -> HTML scraper (no API key needed)
+                    from scrapers import ebay_web
 
-                all_items = ebay.search(query[1], nbr_items=items_per_query)
+                    all_items = ebay_web.search(query[1], nbr_items=items_per_query)
+                else:
+                    # Plain keyword -> official eBay API
+                    from scrapers import ebay
+
+                    all_items = ebay.search(query[1], nbr_items=items_per_query)
             else:
                 all_items = vinted.items.search(query[1], nbr_items=items_per_query)
 

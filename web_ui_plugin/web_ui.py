@@ -54,7 +54,10 @@ def index():
         query_name = (
             query[3]
             if query[3] is not None
-            else query_params.get("search_text", [None])[0]
+            else (
+                query_params.get("search_text", [None])[0]
+                or query_params.get("_nkw", [None])[0]
+            )
         )
 
         # Get the last timestamp for this query
@@ -157,7 +160,10 @@ def queries():
         query_name = (
             query[3]
             if query[3] is not None
-            else query_params.get("search_text", [None])[0]
+            else (
+                query_params.get("search_text", [None])[0]
+                or query_params.get("_nkw", [None])[0]
+            )
         )
 
         # Get the last timestamp for this query
@@ -321,7 +327,10 @@ def items():
         parsed_query = urlparse(q[1])
         query_params = parse_qs(parsed_query.query)
         query_name = (
-            q[3] if q[3] is not None else query_params.get("search_text", [None])[0]
+            q[3] if q[3] is not None else (
+                query_params.get("search_text", [None])[0]
+                or query_params.get("_nkw", [None])[0]
+            )
         )
         display_name = query_name if query_name else q[0]
         # Store display name for selected query
