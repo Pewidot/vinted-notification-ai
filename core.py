@@ -592,6 +592,9 @@ def record_items_prices(query_id, items, price_queue=None, threshold=None,
         threshold = get_price_threshold()
     skip_index_ids = skip_index_ids or set()
     seen = new = changed = indexed = 0
+    # Notifications are collected first: a systemic display change (see below)
+    # can only be recognised by looking at the whole batch.
+    candidates = []
 
     for item in items:
         price = getattr(item, "price", None)
@@ -627,7 +630,7 @@ def record_items_prices(query_id, items, price_queue=None, threshold=None,
         seen += 1
         if status == "new":
             new += 1
-        elif status in ("flapping", "currency_switch", "vat_switch"):
+        elif status in ("flapping", "currency_switch"):
             # Recorded in the history, but not a real move - stay silent.
             # Seen on worldwide eBay listings that alternate between two values.
             logger.debug(
@@ -644,7 +647,7 @@ def record_items_prices(query_id, items, price_queue=None, threshold=None,
             if price_queue is not None and old_price:
                 pct = (float(new_price) - float(old_price)) / float(old_price) * 100
                 if abs(pct) >= threshold:
-                    price_queue.put({
+                    candidates.append({
                         "type": "price_change",
                         "query_id": query_id,
                         "title": getattr(item, "title", "") or "",
@@ -655,7 +658,51 @@ def record_items_prices(query_id, items, price_queue=None, threshold=None,
                         "currency": getattr(item, "currency", "EUR"),
                         "pct": pct,
                     })
+
+    for event in _drop_systemic_changes(candidates):
+        price_queue.put(event)
+
     return seen, new, changed, indexed
+
+
+# When this many listings move by the exact same percentage in one run, it is a
+# display-side change (eBay converting foreign-currency listings with a
+# different exchange rate), not a real price move.
+SYSTEMIC_CHANGE_MIN_ITEMS = 3
+SYSTEMIC_CHANGE_TOLERANCE = 1  # decimals used when grouping percentages
+
+
+def _drop_systemic_changes(candidates):
+    """
+    Filter out price changes that hit many unrelated listings identically.
+
+    Real prices are set per listing, so a skateboard, a CD and a figure lot do
+    not all drop by exactly 7.5% within the same minute - that only happens when
+    the whole page was rendered with a different conversion rate. Those batches
+    are recorded in the history but must not produce notifications.
+    """
+    if len(candidates) < SYSTEMIC_CHANGE_MIN_ITEMS:
+        return candidates
+
+    from collections import Counter
+
+    buckets = Counter(round(c["pct"], SYSTEMIC_CHANGE_TOLERANCE) for c in candidates)
+    kept = []
+    dropped = Counter()
+    for c in candidates:
+        bucket = round(c["pct"], SYSTEMIC_CHANGE_TOLERANCE)
+        if buckets[bucket] >= SYSTEMIC_CHANGE_MIN_ITEMS:
+            dropped[bucket] += 1
+        else:
+            kept.append(c)
+
+    for bucket, count in dropped.items():
+        logger.info(
+            f"[PRICES] Suppressed {count} notifications: {count} listings all moved "
+            f"by {bucket:+.1f}% at once - that is a conversion/display change, "
+            f"not a real price move"
+        )
+    return kept
 
 
 def run_price_check(query_id, query, platform, depth, price_queue=None,

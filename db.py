@@ -612,30 +612,21 @@ def update_last_price_check(query_id, timestamp=None):
             conn.close()
 
 
-# eBay shows some (mostly commercial / cross-border) listings alternately with
-# and without VAT, so the same unchanged listing appears to jump by exactly the
-# VAT rate - e.g. 39.58 <-> 47.10, which is exactly x1.19. Matching the common
-# EU rates with a tight tolerance keeps genuine price moves detectable.
-VAT_MULTIPLIERS = (1.05, 1.07, 1.09, 1.10, 1.17, 1.19, 1.20, 1.21, 1.22,
-                   1.23, 1.24, 1.25, 1.27)
-VAT_TOLERANCE = 0.002  # 0.2% - tight enough not to swallow real price changes
+"""
+Note on tax-driven phantom price changes
+----------------------------------------
+eBay adds the tax of the region it thinks the viewer is in, so the same listing
+shows different amounts depending on which proxy fetched the page (measured:
+x1.081 = Swiss VAT 8.1%, x1.062 = US sales tax 6.25%, x1.119 = 12%).
 
+Matching those ratios directly was tried and rejected: a x1.25 ratio is also a
+plain -20% discount and x1.19 a -16% one, so the rule swallowed real price
+drops. The artefact is instead caught by two far more specific signals:
 
-def looks_like_vat_switch(old_price, new_price):
-    """
-    True if the two prices differ by exactly a common VAT rate.
-
-    Used to tell "the same listing was shown net instead of gross" apart from a
-    real price change, which otherwise produces a notification on every run.
-    """
-    try:
-        old_v, new_v = float(old_price), float(new_price)
-    except (TypeError, ValueError):
-        return False
-    if old_v <= 0 or new_v <= 0:
-        return False
-    ratio = max(old_v, new_v) / min(old_v, new_v)
-    return any(abs(ratio - m) <= VAT_TOLERANCE for m in VAT_MULTIPLIERS)
+  * flapping           - the price returns to a value it just had (see below)
+  * systemic changes   - many unrelated listings move by the exact same
+                         percentage in one run (see core._drop_systemic_changes)
+"""
 
 
 def record_price(item, query_id, price, currency="EUR", title=None, url=None,
@@ -656,8 +647,6 @@ def record_price(item, query_id, price, currency="EUR", title=None, url=None,
                                 but not announced)
               "currency_switch" price arrived in a different currency, so the
                                 numbers are not comparable (ignored)
-              "vat_switch"      same listing shown net instead of gross (or vice
-                                versa) - differs by exactly a VAT rate (ignored)
               "unchanged"       same price as before
     """
     import time as _time
@@ -704,23 +693,6 @@ def record_price(item, query_id, price, currency="EUR", title=None, url=None,
         # the observation is ignored entirely: no history row (it would mix
         # currencies in one series) and no change to last_price. Only the
         # "seen" bookkeeping is updated below.
-        # Within one currency the remaining artefact is the net/gross flip:
-        # eBay shows some listings with VAT and some without, so an unchanged
-        # listing appears to jump by exactly the VAT rate
-        # (e.g. 39.58 <-> 47.10 = x1.19).
-        ignore_reason = "vat_switch" if looks_like_vat_switch(old_price, price) else None
-
-        if ignore_reason:
-            cursor.execute(
-                "UPDATE tracked_items SET last_seen=?, observations=observations+1,"
-                " title=COALESCE(?, title), url=COALESCE(?, url),"
-                " photo_url=COALESCE(?, photo_url)"
-                " WHERE item=? AND query_id=? AND currency=?",
-                (ts, title, url, photo_url, item, query_id, currency),
-            )
-            conn.commit()
-            return ignore_reason, old_price, price
-
         changed = old_price is None or abs(float(old_price) - float(price)) > 0.001
 
         status = "unchanged"
