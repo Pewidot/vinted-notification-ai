@@ -38,6 +38,14 @@ EBAY_FETCH_TIMEOUT_CAP = 12
 
 PRICE_RE = re.compile(r"(?P<currency>EUR|USD|GBP|CHF|\$|£)\s*(?P<amount>\d{1,3}(?:\.\d{3})*(?:,\d+)?|\d+(?:\.\d+)?)")
 DATE_RE = re.compile(r"^(\d{1,2})\.?\s*([A-Za-zÄäÖöÜü]{3})\.?\s+(\d{1,2}):(\d{2})$")
+# Auction rows look like "0 Gebote · Restzeit Noch 1 Std 38 Min (Heute 07:08)"
+BIDS_RE = re.compile(r"(\d+)\s*(?:Gebot|Gebote|bid|bids)\b", re.IGNORECASE)
+# Remaining time: days / hours / minutes, German (Tg/Std/Min) and English (d/h/m).
+# Deliberately one pattern per unit - a single all-optional pattern would happily
+# match the empty string and always report "no time left".
+DAYS_RE = re.compile(r"(\d+)\s*(?:Tage|Tag|Tg|T|d)\b", re.IGNORECASE)
+HOURS_RE = re.compile(r"(\d+)\s*(?:Stunden|Std|h)\b", re.IGNORECASE)
+MINS_RE = re.compile(r"(\d+)\s*(?:Minuten|Min|m)\b", re.IGNORECASE)
 ITM_ID_RE = re.compile(r"/itm/(\d{9,})")
 
 MONTHS = {
@@ -70,6 +78,30 @@ def _parse_price(price_text):
         return float(amount), currency
     except ValueError:
         return 0.0, currency
+
+
+def _parse_time_left(text):
+    """
+    Turn an eBay remaining-time string into seconds.
+
+    Accepts the German and English wordings that appear in the result rows,
+    e.g. "Restzeit Noch 1 Std 38 Min" or "1d 5h left".
+
+    Returns:
+        int: seconds remaining, or 0 if nothing parseable was found
+    """
+    if not text:
+        return 0
+    # Strip the bid count ("0 Gebote", "5 bids") so its number cannot be read as
+    # a duration. The labels themselves need no handling: every unit pattern
+    # requires its own unit letter directly after the digits.
+    text = BIDS_RE.sub(" ", text)
+
+    def unit(pattern):
+        m = pattern.search(text)
+        return int(m.group(1)) if m else 0
+
+    return unit(DAYS_RE) * 86400 + unit(HOURS_RE) * 3600 + unit(MINS_RE) * 60
 
 
 def _parse_date(date_text):
@@ -158,11 +190,23 @@ class EbayWebItem:
         # Listing date is one of the attribute rows (only present with _sop=10);
         # sponsored/ad cards have none and therefore never count as new
         self.raw_timestamp = 0
+        # Auction state: bids and remaining time live in the same rows
+        self.is_auction = False
+        self.bids = 0
+        self.auction_end = 0
         for row in card.select(".s-card__attribute-row"):
-            ts = _parse_date(row.get_text(strip=True))
-            if ts:
-                self.raw_timestamp = ts
-                break
+            text = row.get_text(" ", strip=True)
+            if not self.raw_timestamp:
+                ts = _parse_date(text.strip())
+                if ts:
+                    self.raw_timestamp = ts
+            bids_match = BIDS_RE.search(text)
+            if bids_match:
+                self.is_auction = True
+                self.bids = int(bids_match.group(1))
+                seconds_left = _parse_time_left(text)
+                if seconds_left:
+                    self.auction_end = int(time.time()) + seconds_left
 
     def is_new_item(self, minutes=20):
         if not self.raw_timestamp:
@@ -318,7 +362,22 @@ def parse_html(html, base_netloc="www.ebay.de"):
     return items
 
 
-def search(url, nbr_items=20):
+def page_url(url, page):
+    """Build the URL for result page N (eBay uses the _pgn parameter)."""
+    if page <= 1:
+        return url
+    from urllib.parse import parse_qs, urlencode, urlunparse
+
+    parsed = urlparse(url)
+    params = parse_qs(parsed.query)
+    params["_pgn"] = [str(page)]
+    return urlunparse(
+        (parsed.scheme, parsed.netloc, parsed.path, parsed.params,
+         urlencode(params, doseq=True), parsed.fragment)
+    )
+
+
+def search(url, nbr_items=20, page=1):
     """
     Retrieve listings from an eBay search URL (scraper, no API).
 
@@ -326,6 +385,7 @@ def search(url, nbr_items=20):
         url (str): The ebay search URL (/sch/i.html?...), sorted by newly listed.
             A plain search term is also accepted and converted to an ebay.de URL.
         nbr_items (int, optional): Maximum number of items to return
+        page (int, optional): Result page to fetch (1 = newest)
 
     Returns:
         List[EbayWebItem]: Parsed listings in page order (newest first)
@@ -334,7 +394,7 @@ def search(url, nbr_items=20):
         from urllib.parse import urlencode
 
         url = f"https://www.ebay.de/sch/i.html?{urlencode({'_nkw': url, '_sop': '10'})}"
-    html = _fetch(url)
+    html = _fetch(page_url(url, page))
     netloc = urlparse(url).netloc or "www.ebay.de"
     items = parse_html(html, base_netloc=netloc)
     logger.info(f"Parsed {len(items)} eBay listings from search page")

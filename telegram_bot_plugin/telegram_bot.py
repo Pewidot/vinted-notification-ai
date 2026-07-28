@@ -27,7 +27,7 @@ async def hello(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 class LeRobot:
-    def __init__(self, queue):
+    def __init__(self, queue, price_queue=None):
         from telegram import Bot
         from telegram.ext import ApplicationBuilder, CommandHandler
 
@@ -50,6 +50,8 @@ class LeRobot:
 
             # Create the item queue to send to telegram
             self.new_items_queue = queue
+            # Price changes arrive on their own queue (may be absent)
+            self.price_queue = price_queue
 
             # Handler verify if bot is running
             self.app.add_handler(CommandHandler("hello", hello))
@@ -72,10 +74,11 @@ class LeRobot:
             job_queue = self.app.job_queue
             # Set the commands
             job_queue.run_once(self.set_commands, when=1)
-            # Every day we check for a new version
-            job_queue.run_repeating(self.check_version, interval=86400, first=1)
             # Every second we check for new posts to send to telegram
             job_queue.run_once(self.check_telegram_queue, when=1)
+            # Price changes are delivered on a separate queue
+            if self.price_queue is not None:
+                job_queue.run_once(self.check_price_queue, when=2)
 
             self.app.run_polling()
         except Exception as e:
@@ -328,23 +331,6 @@ class LeRobot:
         except Exception as e:
             logger.error(f"Error sending new post: {str(e)}", exc_info=True)
 
-    async def check_version(self, context: ContextTypes.DEFAULT_TYPE):
-        try:
-            # get latest version from the repository
-            should_update, VER, latest_version, url = core.check_version()
-
-            if not should_update:
-                # Notify the command bot's chat about the available update
-                await self.send_new_post(
-                    self.command_token,
-                    self.command_chat,
-                    f"Version {latest_version} is now available. Please update the bot.",
-                    url,
-                    "Open Github",
-                )
-        except Exception as e:
-            logger.error(f"Error checking for new version: {str(e)}", exc_info=True)
-
     async def check_telegram_queue(self, context: ContextTypes.DEFAULT_TYPE):
         try:
             while 1:
@@ -382,6 +368,58 @@ class LeRobot:
                     pass
         except Exception as e:
             logger.error(f"Error checking telegram queue: {str(e)}", exc_info=True)
+
+    async def check_price_queue(self, context: ContextTypes.DEFAULT_TYPE):
+        """Deliver price-change messages, routed to the query's price bots."""
+        try:
+            while 1:
+                if self.price_queue is not None and not self.price_queue.empty():
+                    ev = self.price_queue.get()
+                    query_id = ev.get("query_id")
+
+                    targets = db.get_query_price_targets(query_id)
+                    if not targets:
+                        logger.warning(
+                            f"No telegram bot resolved for price update of query {query_id}"
+                        )
+                        continue
+
+                    cur = ev.get("currency", "EUR")
+                    query_name = db.get_query_name(query_id)
+
+                    if ev.get("type") == "auction_ending":
+                        import time as _time
+
+                        mins = max(0, int((ev.get("ends_at", 0) - _time.time()) / 60))
+                        content = (
+                            f"⏰ <b>Auction ending in ~{mins} min</b>\n"
+                            f"🔎 {query_name}\n"
+                            f"<b>{ev.get('title', '')}</b>\n"
+                            f"Current bid: <b>{ev.get('price', 0):.2f} {cur}</b>"
+                        )
+                        button = "Bid now"
+                    else:
+                        old_p, new_p = ev.get("old_price", 0), ev.get("new_price", 0)
+                        pct = ev.get("pct", 0)
+                        arrow = "📉" if new_p < old_p else "📈"
+                        content = (
+                            f"{arrow} <b>Price {'drop' if new_p < old_p else 'increase'}</b>"
+                            f" {pct:+.1f}%\n"
+                            f"🔎 {query_name}\n"
+                            f"<b>{ev.get('title', '')}</b>\n"
+                            f"{old_p:.2f} {cur}  →  <b>{new_p:.2f} {cur}</b>"
+                        )
+                        button = "Open listing"
+
+                    for bot_id, bot_name, token, chat_id in targets:
+                        await self.send_new_post(
+                            token, chat_id, content, ev.get("url", ""),
+                            button, None, None, ev.get("photo"),
+                        )
+                else:
+                    await asyncio.sleep(0.5)
+        except Exception as e:
+            logger.error(f"Error checking price queue: {str(e)}", exc_info=True)
 
     async def set_commands(self, context: ContextTypes.DEFAULT_TYPE):
         try:

@@ -13,7 +13,7 @@ import random
 import re
 import time
 from datetime import datetime, timedelta
-from urllib.parse import urljoin
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -215,18 +215,52 @@ def parse_html(html):
     return items
 
 
-def search(url, nbr_items=20):
+def page_url(url, page):
+    """
+    Build the URL for result page N.
+
+    Kleinanzeigen puts the page into the path rather than a query parameter:
+        /s-nike-air-max/k0  ->  /s-seite:2/nike-air-max/k0
+    """
+    if page <= 1:
+        return url
+    parsed = urlparse(url)
+    parts = [p for p in parsed.path.split("/") if p]
+    # Path-based paging applies to the /s-<term>/... layout, not to the
+    # /s-suchanfrage.html?keywords=... form, which pages via a query parameter.
+    if parts and parts[0].startswith("s-") and not parts[0].endswith(".html"):
+        rest = parts[0][2:]  # drop the leading "s-"
+        new_parts = [f"s-seite:{page}"]
+        if rest:
+            new_parts.append(rest)
+        new_parts.extend(parts[1:])
+        new_path = "/" + "/".join(new_parts)
+        return urlunparse(
+            (parsed.scheme, parsed.netloc, new_path, parsed.params,
+             parsed.query, parsed.fragment)
+        )
+    # Unknown layout (e.g. /s-suchanfrage.html?keywords=...) -> use the query param
+    params = parse_qs(parsed.query)
+    params["pageNum"] = [str(page)]
+    return urlunparse(
+        (parsed.scheme, parsed.netloc, parsed.path, parsed.params,
+         urlencode(params, doseq=True), parsed.fragment)
+    )
+
+
+def search(url, nbr_items=20, page=1):
     """
     Retrieve listings from a Kleinanzeigen search URL.
 
     Args:
         url (str): The kleinanzeigen.de search URL
         nbr_items (int, optional): Maximum number of items to return
+        page (int, optional): Result page to fetch (1 = newest)
 
     Returns:
         List[KleinanzeigenItem]: Parsed listings, newest first (page order)
     """
-    html = _fetch(url)
+    html = _fetch(page_url(url, page))
     items = parse_html(html)
-    logger.info(f"Parsed {len(items)} Kleinanzeigen listings")
+    logger.info(f"Parsed {len(items)} Kleinanzeigen listings (page {page})")
     return items[:nbr_items]

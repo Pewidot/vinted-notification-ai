@@ -1,0 +1,231 @@
+{% extends "base.html" %}
+
+{% block title %}Price History - Multisite Track{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
+    <h1 class="h2">Price History</h1>
+</div>
+
+<!-- Summary -->
+<div class="row mb-4">
+    <div class="col-md-3 col-6">
+        <div class="card h-100 border-0 shadow-sm">
+            <div class="card-body text-center">
+                <h5 class="card-title">Tracked Items</h5>
+                <h2 class="display-5 fw-bold text-primary">{{ stats.tracked_items }}</h2>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3 col-6">
+        <div class="card h-100 border-0 shadow-sm">
+            <div class="card-body text-center">
+                <h5 class="card-title">Price Changes</h5>
+                <h2 class="display-5 fw-bold text-warning">{{ stats.changed }}</h2>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3 col-6">
+        <div class="card h-100 border-0 shadow-sm">
+            <div class="card-body text-center">
+                <h5 class="card-title">Price Drops</h5>
+                <h2 class="display-5 fw-bold text-success">{{ stats.dropped }}</h2>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3 col-6">
+        <div class="card h-100 border-0 shadow-sm">
+            <div class="card-body text-center">
+                <h5 class="card-title">Observations</h5>
+                <h2 class="display-5 fw-bold text-info">{{ stats.observations }}</h2>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Filter -->
+<div class="card mb-4">
+    <div class="card-body">
+        <form method="get" class="row g-2 align-items-end">
+            <div class="col-md-5">
+                <label for="query" class="form-label">Query</label>
+                <select class="form-select" id="query" name="query" onchange="this.form.submit()">
+                    <option value="">All tracked queries</option>
+                    {% for q in tracked_queries %}
+                    <option value="{{ q.id }}" {% if selected_query == q.id %}selected{% endif %}>
+                        {{ q.name }} ({{ q.platform }})
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-4">
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" id="changed" name="changed" value="1"
+                           {% if changed_only %}checked{% endif %} onchange="this.form.submit()">
+                    <label class="form-check-label" for="changed">Only items whose price changed</label>
+                </div>
+            </div>
+            <div class="col-md-3 text-end">
+                {% if not tracked_queries %}
+                <span class="text-muted small">No query has price tracking enabled yet -
+                    switch it on when adding or editing a query.</span>
+                {% endif %}
+            </div>
+        </form>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header d-flex align-items-center">
+        <i class="bi bi-graph-down-arrow me-2 text-info"></i>
+        <h5 class="card-title mb-0">Tracked Listings</h5>
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead>
+                <tr>
+                    <th>Image</th>
+                    <th>Title</th>
+                    <th>Query</th>
+                    <th class="text-end">First</th>
+                    <th class="text-end">Current</th>
+                    <th class="text-end">Change</th>
+                    <th>Trend</th>
+                    <th>Last Seen</th>
+                    <th></th>
+                </tr>
+                </thead>
+                <tbody>
+                {% for it in items %}
+                <tr>
+                    <td>
+                        {% if it.photo_url %}
+                        <img src="{{ it.photo_url }}" alt="{{ it.title }}" class="img-thumbnail"
+                             style="width: 56px; height: 56px; object-fit: cover;" loading="lazy">
+                        {% else %}
+                        <div class="bg-light d-flex align-items-center justify-content-center"
+                             style="width: 56px; height: 56px;">
+                            <i class="bi bi-image text-muted"></i>
+                        </div>
+                        {% endif %}
+                    </td>
+                    <td style="max-width: 260px;">
+                        <div class="text-truncate">{{ it.title }}</div>
+                        <small class="text-muted">{{ it.observations }} checks</small>
+                    </td>
+                    <td>
+                        {% if it.platform == 'kleinanzeigen' %}
+                        <span class="badge bg-warning text-dark">Kleinanzeigen</span>
+                        {% elif it.platform == 'ebay' %}
+                        <span class="badge bg-primary">eBay</span>
+                        {% else %}
+                        <span class="badge bg-success">Vinted</span>
+                        {% endif %}
+                        <div class="small text-muted text-truncate" style="max-width: 140px;">{{ it.query_name }}</div>
+                    </td>
+                    <td class="text-end text-muted">{{ "%.2f"|format(it.first_price or 0) }} {{ it.currency }}</td>
+                    <td class="text-end fw-bold">{{ "%.2f"|format(it.last_price or 0) }} {{ it.currency }}</td>
+                    <td class="text-end">
+                        {% if it.change_pct < -0.01 %}
+                        <span class="badge bg-success">{{ "%.1f"|format(it.change_pct) }}%</span>
+                        {% elif it.change_pct > 0.01 %}
+                        <span class="badge bg-danger">+{{ "%.1f"|format(it.change_pct) }}%</span>
+                        {% else %}
+                        <span class="text-muted">–</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {# Inline sparkline: no chart library needed, works offline #}
+                        {% if it.spark|length > 1 %}
+                        {% set mn = it.spark|min %}
+                        {% set mx = it.spark|max %}
+                        {% set span = (mx - mn) if (mx - mn) > 0 else 1 %}
+                        <svg width="90" height="28" viewBox="0 0 90 28" preserveAspectRatio="none">
+                            <polyline fill="none"
+                                      stroke="{{ '#198754' if it.change_pct < 0 else ('#dc3545' if it.change_pct > 0 else '#6c757d') }}"
+                                      stroke-width="2"
+                                      points="{% for p in it.spark %}{{ loop.index0 * (88 / (it.spark|length - 1)) + 1 }},{{ 25 - ((p - mn) / span * 22) }} {% endfor %}"/>
+                        </svg>
+                        {% else %}
+                        <span class="text-muted small">one price</span>
+                        {% endif %}
+                    </td>
+                    <td class="small text-muted">{{ it.last_seen }}</td>
+                    <td>
+                        <div class="btn-group btn-group-sm">
+                            <button type="button" class="btn btn-outline-secondary"
+                                    data-bs-toggle="modal" data-bs-target="#hist{{ loop.index }}">
+                                <i class="bi bi-graph-up"></i>
+                            </button>
+                            {% if it.url %}
+                            <a href="{{ it.url }}" target="_blank" class="btn btn-outline-primary">
+                                <i class="bi bi-box-arrow-up-right"></i>
+                            </a>
+                            {% endif %}
+                        </div>
+
+                        <div class="modal fade" id="hist{{ loop.index }}" tabindex="-1" aria-hidden="true">
+                            <div class="modal-dialog modal-lg">
+                                <div class="modal-content">
+                                    <div class="modal-header">
+                                        <h5 class="modal-title text-truncate">{{ it.title }}</h5>
+                                        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                                    </div>
+                                    <div class="modal-body">
+                                        <div class="row">
+                                            <div class="col-md-4">
+                                                {% if it.photo_url %}
+                                                <img src="{{ it.photo_url }}" class="img-fluid rounded mb-2"
+                                                     alt="{{ it.title }}">
+                                                {% endif %}
+                                                <div class="small text-muted">{{ it.query_name }}</div>
+                                                <div>{{ "%.2f"|format(it.first_price or 0) }} →
+                                                    <b>{{ "%.2f"|format(it.last_price or 0) }} {{ it.currency }}</b>
+                                                </div>
+                                            </div>
+                                            <div class="col-md-8">
+                                                {% if it.spark|length > 1 %}
+                                                {% set mn = it.spark|min %}
+                                                {% set mx = it.spark|max %}
+                                                {% set span = (mx - mn) if (mx - mn) > 0 else 1 %}
+                                                <svg width="100%" height="200" viewBox="0 0 400 200">
+                                                    <polyline fill="none" stroke="#09B1BA" stroke-width="2"
+                                                              points="{% for p in it.spark %}{{ loop.index0 * (390 / (it.spark|length - 1)) + 5 }},{{ 180 - ((p - mn) / span * 160) }} {% endfor %}"/>
+                                                    {% for p in it.spark %}
+                                                    <circle cx="{{ loop.index0 * (390 / (it.spark|length - 1)) + 5 }}"
+                                                            cy="{{ 180 - ((p - mn) / span * 160) }}" r="3"
+                                                            fill="#09B1BA"/>
+                                                    {% endfor %}
+                                                    <text x="5" y="14" font-size="12" fill="#666">{{ "%.2f"|format(mx) }}</text>
+                                                    <text x="5" y="196" font-size="12" fill="#666">{{ "%.2f"|format(mn) }}</text>
+                                                </svg>
+                                                {% else %}
+                                                <p class="text-muted">Only one price recorded so far – the chart
+                                                    appears once the price changes.</p>
+                                                {% endif %}
+                                                <div class="small text-muted">
+                                                    Prices: {% for p in it.spark %}{{ "%.2f"|format(p) }}{% if not loop.last %} → {% endif %}{% endfor %}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="9" class="text-center text-muted py-4">
+                        No price data yet. Enable price tracking on a query – the first run
+                        happens within the next scheduler tick.
+                    </td>
+                </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}

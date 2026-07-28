@@ -26,12 +26,12 @@ app.secret_key = os.urandom(24)
 
 @app.context_processor
 def inject_version_info():
-    is_up_to_date, current_ver, latest_version, github_url = core.check_version()
+    # No update check: the version is shown for reference only, and the old
+    # "update available" banner (plus its request to GitHub on every page load)
+    # is gone.
     return {
-        "github_url": github_url,
-        "current_version": current_ver,
-        "latest_version": latest_version,
-        "is_up_to_date": is_up_to_date,
+        "github_url": db.get_parameter("github_url"),
+        "current_version": db.get_parameter("version"),
     }
 
 
@@ -177,6 +177,7 @@ def queries():
             last_found_item = "Never"
 
         linked_bots = db.get_query_bots(query[0])
+        price_bots = db.get_query_price_bots(query[0])
         formatted_queries.append(
             {
                 "id": i + 1,
@@ -189,6 +190,10 @@ def queries():
                 "active": (True if len(query) <= 7 or query[7] is None else bool(query[7])),
                 "bot_ids": [b[0] for b in linked_bots],
                 "bot_names": [b[1] for b in linked_bots],
+                "track_prices": bool(query[8]) if len(query) > 8 and query[8] else False,
+                "price_interval": (query[9] if len(query) > 9 and query[9] else 360),
+                "price_depth": (query[10] if len(query) > 10 and query[10] else 1),
+                "price_bot_ids": [b[0] for b in price_bots],
             }
         )
 
@@ -208,12 +213,20 @@ def add_query():
     if platform not in ("vinted", "kleinanzeigen", "ebay"):
         platform = "vinted"
     bot_ids = [int(b) for b in request.form.getlist("bot_ids") if b.isdigit()]
+    price_bot_ids = [int(b) for b in request.form.getlist("price_bot_ids") if b.isdigit()]
+    track_prices = "track_prices" in request.form
+    price_interval = request.form.get("price_interval", 360, type=int) or 360
+    price_depth = request.form.get("price_depth", 1, type=int) or 1
     if query:
         message, is_new_query = core.process_query(
             query,
             name=query_name if query_name != "" else None,
             platform=platform,
             bot_ids=bot_ids,
+            track_prices=track_prices,
+            price_interval=price_interval,
+            price_depth=price_depth,
+            price_bot_ids=price_bot_ids,
         )
         if is_new_query:
             flash(f"Query added: {query}", "success")
@@ -252,6 +265,10 @@ def update_query(query_id):
     query = request.form.get("query")
     query_name = request.form.get("query_name", "").strip()
     bot_ids = [int(b) for b in request.form.getlist("bot_ids") if b.isdigit()]
+    price_bot_ids = [int(b) for b in request.form.getlist("price_bot_ids") if b.isdigit()]
+    track_prices = "track_prices" in request.form
+    price_interval = request.form.get("price_interval", 360, type=int) or 360
+    price_depth = request.form.get("price_depth", 1, type=int) or 1
 
     if query:
         message, success = core.process_update_query(
@@ -259,6 +276,10 @@ def update_query(query_id):
             query,
             name=query_name if query_name != "" else None,
             bot_ids=bot_ids,
+            track_prices=track_prices,
+            price_interval=price_interval,
+            price_depth=price_depth,
+            price_bot_ids=price_bot_ids,
         )
         if success:
             flash("Query updated", "success")
@@ -445,6 +466,73 @@ def reset_proxies():
         "success",
     )
     return redirect(url_for("config"))
+
+
+@app.route("/prices")
+def prices():
+    query_id = request.args.get("query", type=int)
+    changed_only = request.args.get("changed") == "1"
+    limit = request.args.get("limit", 100, type=int)
+
+    rows = db.get_tracked_items(query_id=query_id, limit=limit, changed_only=changed_only)
+    items = []
+    for r in rows:
+        (item, qid, title, url, photo_url, currency, first_price,
+         last_price, first_seen, last_seen, observations, query_name, platform) = r
+        try:
+            change_pct = ((last_price - first_price) / first_price * 100) if first_price else 0
+        except (TypeError, ZeroDivisionError):
+            change_pct = 0
+        history = db.get_price_history(item, qid)
+        items.append({
+            "item": item,
+            "query_id": qid,
+            "title": title or "(no title)",
+            "url": url,
+            "photo_url": photo_url,
+            "currency": currency or "EUR",
+            "first_price": first_price,
+            "last_price": last_price,
+            "change_pct": change_pct,
+            "observations": observations,
+            "query_name": query_name or f"Query {qid}",
+            "platform": platform or "vinted",
+            "last_seen": datetime.fromtimestamp(last_seen).strftime("%Y-%m-%d %H:%M")
+            if last_seen else "-",
+            "spark": [float(h[0]) for h in history],
+        })
+
+    # Queries that have tracking switched on, for the filter dropdown
+    tracked_queries = []
+    for q in db.get_queries():
+        if len(q) > 8 and q[8]:
+            parsed = parse_qs(urlparse(q[1]).query)
+            name = q[3] or parsed.get("search_text", [None])[0] or parsed.get("_nkw", [None])[0] or q[1]
+            tracked_queries.append({"id": q[0], "name": name, "platform": q[6] or "vinted"})
+
+    return render_template(
+        "prices.html",
+        items=items,
+        stats=db.get_price_stats(),
+        tracked_queries=tracked_queries,
+        selected_query=query_id,
+        changed_only=changed_only,
+    )
+
+
+@app.route("/price_history/<item>")
+def price_history(item):
+    """Full price history of one listing (used by the detail view)."""
+    query_id = request.args.get("query", type=int)
+    history = db.get_price_history(item, query_id)
+    return jsonify({
+        "item": item,
+        "points": [
+            {"price": float(p), "currency": c,
+             "timestamp": t, "date": datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M")}
+            for p, c, t in history
+        ],
+    })
 
 
 @app.route("/telegram_bots")

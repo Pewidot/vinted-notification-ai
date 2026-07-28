@@ -63,7 +63,18 @@ def normalize_query_for_platform(query, platform):
     return None, None  # vinted is normalized by the caller (process_query/process_update_query)
 
 
-def process_query(query, name=None, telegram_chat_id=None, platform="vinted", bot_ids=None):
+def _apply_price_settings(query_id, track_prices, price_interval, price_depth, price_bot_ids):
+    """Persist the price-tracking options of a query (shared by add and update)."""
+    if track_prices is not None:
+        db.set_query_price_tracking(
+            query_id, track_prices, interval=price_interval, depth=price_depth
+        )
+    if price_bot_ids is not None:
+        db.set_query_price_bots(query_id, price_bot_ids)
+
+
+def process_query(query, name=None, telegram_chat_id=None, platform="vinted", bot_ids=None,
+                  track_prices=None, price_interval=None, price_depth=None, price_bot_ids=None):
     """
     Process a query for the given platform and add it to the database.
 
@@ -99,8 +110,10 @@ def process_query(query, name=None, telegram_chat_id=None, platform="vinted", bo
             return "Query already exists.", False
         new_id = db.add_query_to_db(processed_query, name, telegram_chat_id, platform)
         # Link the selected telegram bots (if any)
-        if new_id is not None and bot_ids is not None:
-            db.set_query_bots(new_id, bot_ids)
+        if new_id is not None:
+            if bot_ids is not None:
+                db.set_query_bots(new_id, bot_ids)
+            _apply_price_settings(new_id, track_prices, price_interval, price_depth, price_bot_ids)
         return "Query added.", True
 
     # Check if the URL is a brand URL (format: url/brand/id-name)
@@ -156,8 +169,10 @@ def process_query(query, name=None, telegram_chat_id=None, platform="vinted", bo
         # add the query to the db
         new_id = db.add_query_to_db(processed_query, name, telegram_chat_id)
         # Link the selected telegram bots (if any)
-        if new_id is not None and bot_ids is not None:
-            db.set_query_bots(new_id, bot_ids)
+        if new_id is not None:
+            if bot_ids is not None:
+                db.set_query_bots(new_id, bot_ids)
+            _apply_price_settings(new_id, track_prices, price_interval, price_depth, price_bot_ids)
         return "Query added.", True
 
 
@@ -221,7 +236,9 @@ def process_remove_query(number):
         return "Invalid number.", False
 
 
-def process_update_query(query_id, query, name, telegram_chat_id=None, bot_ids=None):
+def process_update_query(query_id, query, name, telegram_chat_id=None, bot_ids=None,
+                         track_prices=None, price_interval=None, price_depth=None,
+                         price_bot_ids=None):
     """
     Process the update of a query in the database.
 
@@ -247,6 +264,7 @@ def process_update_query(query_id, query, name, telegram_chat_id=None, bot_ids=N
         if db.update_query_in_db(query_id, processed_query, name, telegram_chat_id):
             if bot_ids is not None:
                 db.set_query_bots(query_id, bot_ids)
+            _apply_price_settings(query_id, track_prices, price_interval, price_depth, price_bot_ids)
             return "Query updated.", True
         return "Failed to update query.", False
 
@@ -279,6 +297,7 @@ def process_update_query(query_id, query, name, telegram_chat_id=None, bot_ids=N
     if db.update_query_in_db(query_id, processed_query, name, telegram_chat_id):
         if bot_ids is not None:
             db.set_query_bots(query_id, bot_ids)
+        _apply_price_settings(query_id, track_prices, price_interval, price_depth, price_bot_ids)
         return "Query updated.", True
     else:
         return "Failed to update query.", False
@@ -474,6 +493,170 @@ def process_items(queue):
         t.join()
 
 
+def scrape_page(platform, query, page, nbr_items):
+    """
+    Fetch one result page for a query on its platform.
+
+    Returns:
+        list: platform item objects (empty on error)
+    """
+    if platform == "kleinanzeigen":
+        from scrapers import kleinanzeigen
+
+        return kleinanzeigen.search(query, nbr_items=nbr_items, page=page)
+    if platform == "ebay":
+        from scrapers import ebay_web
+
+        return ebay_web.search(query, nbr_items=nbr_items, page=page)
+    return Vinted().items.search(query, nbr_items=nbr_items, page=page)
+
+
+def collect_prices(price_queue=None):
+    """
+    Price tracking run: for every query that is due, walk `price_depth` result
+    pages and record the price of each listing found.
+
+    Deliberately separate from process_items(): that one only reports *new*
+    listings, while price tracking re-reads listings that are already known.
+    Walking deeper pages is what makes history possible - page 1 only ever shows
+    the newest listings, the older ones (and their price changes) live further back.
+
+    Args:
+        price_queue (Queue, optional): queue for price-change notifications
+    """
+    import time as _time
+
+    due = db.get_queries_due_for_price_check()
+    if not due:
+        return
+
+    items_per_query = int(db.get_parameter("items_per_query") or 20)
+    try:
+        threshold = float(db.get_parameter("price_notify_threshold") or 5)
+    except (TypeError, ValueError):
+        threshold = 5.0
+
+    logger.info(f"[PRICES] {len(due)} query/queries due for a price check")
+
+    for query_id, query, platform, depth, interval in due:
+        platform = (platform or "vinted").lower()
+        depth = max(1, int(depth or 1))
+        seen = changed = new = indexed = 0
+        try:
+            for page in range(1, depth + 1):
+                try:
+                    items = scrape_page(platform, query, page, items_per_query)
+                except Exception as e:
+                    logger.warning(
+                        f"[PRICES] {platform} query {query_id} page {page} failed: {str(e)[:120]}"
+                    )
+                    break
+                if not items:
+                    break  # no more results - stop paging
+
+                for item in items:
+                    price = getattr(item, "price", None)
+                    if price is None:
+                        continue
+
+                    # Index every listing we come across, including ones the
+                    # normal scraper never saw (they sit on older pages). Stored
+                    # with their real publish time and WITHOUT advancing the
+                    # query watermark, so this indexing never fires a
+                    # notification and never hides genuinely new listings.
+                    if not db.is_item_in_db_by_id(item.id):
+                        db.add_item_to_db(
+                            id=item.id,
+                            title=getattr(item, "title", None),
+                            query_id=query_id,
+                            price=float(price),
+                            timestamp=getattr(item, "raw_timestamp", 0) or 0,
+                            photo_url=getattr(item, "photo", None),
+                            currency=getattr(item, "currency", "EUR"),
+                            url=getattr(item, "url", None),
+                            update_last_item=False,
+                        )
+                        indexed += 1
+
+                    is_auction = bool(getattr(item, "is_auction", False))
+                    status, old_price, new_price = db.record_price(
+                        item=item.id,
+                        query_id=query_id,
+                        price=float(price),
+                        currency=getattr(item, "currency", "EUR"),
+                        title=getattr(item, "title", None),
+                        url=getattr(item, "url", None),
+                        photo_url=getattr(item, "photo", None),
+                        is_auction=is_auction,
+                        auction_end=getattr(item, "auction_end", 0),
+                    )
+                    seen += 1
+                    if status == "new":
+                        new += 1
+                    elif status == "changed":
+                        changed += 1
+                        # Auction prices move with every bid - the history is
+                        # still recorded, but announcing each bid would be noise.
+                        # Auctions get a single alert shortly before they end.
+                        if is_auction:
+                            continue
+                        if price_queue is not None and old_price:
+                            pct = (float(new_price) - float(old_price)) / float(old_price) * 100
+                            if abs(pct) >= threshold:
+                                price_queue.put({
+                                    "type": "price_change",
+                                    "query_id": query_id,
+                                    "title": getattr(item, "title", "") or "",
+                                    "url": getattr(item, "url", "") or "",
+                                    "photo": getattr(item, "photo", None),
+                                    "old_price": float(old_price),
+                                    "new_price": float(new_price),
+                                    "currency": getattr(item, "currency", "EUR"),
+                                    "pct": pct,
+                                })
+                # Be gentle between pages - deep runs otherwise look like a burst
+                if page < depth:
+                    _time.sleep(2)
+        finally:
+            # Always advance the timer, even after an error, so one broken query
+            # cannot monopolise every following run.
+            db.update_last_price_check(query_id)
+
+        logger.info(
+            f"[PRICES] query {query_id} ({platform}): {seen} listings checked, "
+            f"{new} newly tracked, {indexed} indexed into items, {changed} price change(s)"
+        )
+
+    # After the runs: announce auctions about to close (once each)
+    notify_ending_auctions(price_queue)
+
+
+def notify_ending_auctions(price_queue=None, within_minutes=10):
+    """
+    Send a one-time alert for auctions ending within the next `within_minutes`.
+
+    Auctions are deliberately excluded from per-change price messages (every bid
+    would trigger one); this is the single moment where an alert is useful.
+    """
+    if price_queue is None:
+        return
+    ending = db.get_auctions_ending_soon(within_seconds=within_minutes * 60)
+    for item, query_id, title, url, photo_url, last_price, currency, auction_end in ending:
+        price_queue.put({
+            "type": "auction_ending",
+            "query_id": query_id,
+            "title": title or "",
+            "url": url or "",
+            "photo": photo_url,
+            "price": float(last_price or 0),
+            "currency": currency or "EUR",
+            "ends_at": auction_end,
+        })
+        db.mark_auction_notified(item, query_id)
+    if ending:
+        logger.info(f"[PRICES] {len(ending)} auction(s) ending soon announced")
+
+
 def clear_item_queue(items_queue, new_items_queue):
     """
     Process items from the items_queue.
@@ -596,27 +779,3 @@ def contains_banwords(title, banwords_str):
     return False
 
 
-def check_version():
-    """
-    Check if the application is up to date
-    """
-    try:
-        # Get URL from the database
-        github_url = db.get_parameter("github_url")
-        # Get version from the database
-        ver = db.get_parameter("version")
-        # Get latest version from the repository
-        url = f"{github_url}/releases/latest"
-        response = requests.get(url)
-
-        if response.status_code == 200:
-            latest_version = response.url.split("/")[-1]
-            is_up_to_date = ver == latest_version
-            return is_up_to_date, ver, latest_version, github_url
-        else:
-            # If we can't check, assume it's up to date
-            return True, ver, ver, github_url
-    except Exception as e:
-        logger.error(f"Error checking for new version: {str(e)}", exc_info=True)
-        # If we can't check, assume it's up to date
-        return True, ver, ver, github_url

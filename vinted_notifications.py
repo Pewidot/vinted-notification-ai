@@ -29,7 +29,7 @@ scrape_process = None
 current_query_refresh_delay = None
 
 
-def scraper_process(items_queue):
+def scraper_process(items_queue, price_queue=None):
     logger.info("Scrape process started")
 
     # Get the query refresh delay from the database
@@ -44,6 +44,33 @@ def scraper_process(items_queue):
         args=[items_queue],
         name="scraper",
     )
+
+    # Price tracking runs on its own (much slower) cadence. This job only checks
+    # which queries are due; each query's own interval decides if it actually runs.
+    try:
+        price_tick = int(db.get_parameter("price_scheduler_interval") or 15)
+    except (TypeError, ValueError):
+        price_tick = 15
+    scraper_scheduler.add_job(
+        core.collect_prices,
+        "interval",
+        minutes=max(1, price_tick),
+        args=[price_queue],
+        name="price_tracker",
+    )
+    logger.info(f"Price tracker checks for due queries every {price_tick} minutes")
+
+    # Ending auctions need a much tighter cadence than the scrape itself: the
+    # alert window is 10 minutes, so checking only every price run (default 15
+    # min) would miss auctions entirely. This job just reads the database.
+    scraper_scheduler.add_job(
+        core.notify_ending_auctions,
+        "interval",
+        minutes=2,
+        args=[price_queue],
+        name="auction_watcher",
+    )
+
     scraper_scheduler.start()
     try:
         # Keep the process running
@@ -81,7 +108,7 @@ def dispatcher_function(input_queue, rss_queue, telegram_queue):
         logger.error(f"Error in dispatcher process: {e}", exc_info=True)
 
 
-def telegram_bot_process(queue):
+def telegram_bot_process(queue, price_queue=None):
     logger.info("Telegram bot process started")
     import asyncio
 
@@ -90,14 +117,14 @@ def telegram_bot_process(queue):
         from telegram_bot_plugin.telegram_bot import LeRobot
 
         # The bot will run with app.run_polling() which is already in the module
-        asyncio.run(LeRobot(queue))
+        asyncio.run(LeRobot(queue, price_queue))
     except (KeyboardInterrupt, SystemExit):
         logger.info("Telegram bot process stopped")
     except Exception as e:
         logger.error(f"Error in telegram bot process: {e}", exc_info=True)
 
 
-def check_refresh_delay(items_queue):
+def check_refresh_delay(items_queue, price_queue=None):
     """Check if the query refresh delay has changed and update the scheduler if needed"""
     global scrape_process, current_query_refresh_delay
 
@@ -123,7 +150,7 @@ def check_refresh_delay(items_queue):
             scrape_process.terminate()
             scrape_process.join()
             scrape_process = multiprocessing.Process(
-                target=scraper_process, args=(items_queue,)
+                target=scraper_process, args=(items_queue, price_queue)
             )
             scrape_process.start()
 
@@ -134,11 +161,11 @@ def check_refresh_delay(items_queue):
         logger.error(f"Error updating refresh delay: {e}", exc_info=True)
 
 
-def monitor_processes(items_queue, telegram_queue, rss_queue):
+def monitor_processes(items_queue, telegram_queue, rss_queue, price_queue=None):
     global telegram_process, rss_process
 
     # Check if the query refresh delay has changed
-    check_refresh_delay(items_queue)
+    check_refresh_delay(items_queue, price_queue)
 
     ### TELEGRAM ###
     # Check telegram process status
@@ -152,7 +179,7 @@ def monitor_processes(items_queue, telegram_queue, rss_queue):
         # Start telegram process
         logger.info("Starting telegram bot process.")
         telegram_process = multiprocessing.Process(
-            target=telegram_bot_process, args=(telegram_queue,)
+            target=telegram_bot_process, args=(telegram_queue, price_queue)
         )
         telegram_process.start()
     elif not telegram_should_run and telegram_is_running:
@@ -221,12 +248,15 @@ if __name__ == "__main__":
     new_items_queue = multiprocessing.Queue()
     rss_queue = multiprocessing.Queue()
     telegram_queue = multiprocessing.Queue()
+    # Price-change notifications travel on their own queue so they never mix
+    # with (or delay) the new-listing alerts.
+    price_queue = multiprocessing.Queue()
 
     # 1. Create and start the scrape process
     # This process will scrape items and put them in the items_queue
     current_query_refresh_delay = int(db.get_parameter("query_refresh_delay"))
     scrape_process = multiprocessing.Process(
-        target=scraper_process, args=(items_queue,)
+        target=scraper_process, args=(items_queue, price_queue)
     )
     scrape_process.start()
 
@@ -256,7 +286,7 @@ if __name__ == "__main__":
         monitor_processes,
         "interval",
         seconds=5,
-        args=[items_queue, telegram_queue, rss_queue],
+        args=[items_queue, telegram_queue, rss_queue, price_queue],
         name="process_monitor",
     )
     monitor_scheduler.start()

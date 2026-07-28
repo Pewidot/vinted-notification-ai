@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}Queries - Vinted Notifications{% endblock %}
+{% block title %}Queries - Multisite Track{% endblock %}
 
 {% block content %}
 <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
@@ -77,6 +77,49 @@
                         <div class="col-md-2 d-flex align-items-center">
                             <button type="submit" class="btn btn-primary w-100">Add Query</button>
                         </div>
+
+                        <!-- Price tracking -->
+                        <div class="col-md-12">
+                            <div class="border-top pt-3 mt-1">
+                                <div class="form-check form-switch mb-2">
+                                    <input class="form-check-input" type="checkbox" id="track_prices"
+                                           name="track_prices" onchange="document.getElementById('priceOpts').style.display = this.checked ? '' : 'none'">
+                                    <label class="form-check-label" for="track_prices">
+                                        <strong>Track prices</strong> – re-read these listings regularly and keep
+                                        a price history
+                                    </label>
+                                </div>
+                                <div class="row g-3" id="priceOpts" style="display:none">
+                                    <div class="col-md-3">
+                                        <label for="price_interval" class="form-label">Check every (minutes)</label>
+                                        <input type="number" class="form-control" id="price_interval"
+                                               name="price_interval" value="360" min="5" max="10080">
+                                        <div class="form-text">360 = every 6 hours</div>
+                                    </div>
+                                    <div class="col-md-3">
+                                        <label for="price_depth" class="form-label">Pages to scan</label>
+                                        <input type="number" class="form-control" id="price_depth"
+                                               name="price_depth" value="1" min="1" max="20">
+                                        <div class="form-text">Deeper = older listings included</div>
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label for="price_bot_ids" class="form-label">Price bots&nbsp;<span
+                                                class="text-muted">(optional)</span></label>
+                                        {% if bots %}
+                                        <select class="form-select" id="price_bot_ids" name="price_bot_ids"
+                                                multiple size="3">
+                                            {% for bot in bots %}
+                                            <option value="{{ bot.id }}">{{ bot.name }}</option>
+                                            {% endfor %}
+                                        </select>
+                                        <div class="form-text">Empty = same bots as new-listing alerts</div>
+                                        {% else %}
+                                        <div class="form-text">No bots yet. <a href="/telegram_bots">Add one</a>.</div>
+                                        {% endif %}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </form>
             </div>
@@ -117,6 +160,11 @@
                                 {% endif %}
                                 {% if not query.active %}
                                 <span class="badge bg-secondary">Paused</span>
+                                {% endif %}
+                                {% if query.track_prices %}
+                                <span class="badge bg-info text-dark" title="Price tracking on: every {{ query.price_interval }} min, {{ query.price_depth }} page(s)">
+                                    <i class="bi bi-graph-down-arrow"></i> {{ query.price_interval }}m/{{ query.price_depth }}p
+                                </span>
                                 {% endif %}
                                 {{ query.display }}
                             </td>
@@ -240,6 +288,54 @@
                                                             No bots configured. <a href="/telegram_bots">Add one</a>.
                                                         </div>
                                                         {% endif %}
+                                                    </div>
+
+                                                    <div class="border-top pt-3">
+                                                        <div class="form-check form-switch mb-2">
+                                                            <input class="form-check-input" type="checkbox"
+                                                                   id="track_prices{{ query.id }}" name="track_prices"
+                                                                   {% if query.track_prices %}checked{% endif %}
+                                                                   onchange="document.getElementById('priceOpts{{ query.id }}').style.display = this.checked ? '' : 'none'">
+                                                            <label class="form-check-label"
+                                                                   for="track_prices{{ query.id }}">
+                                                                <strong>Track prices</strong>
+                                                            </label>
+                                                        </div>
+                                                        <div id="priceOpts{{ query.id }}"
+                                                             {% if not query.track_prices %}style="display:none"{% endif %}>
+                                                            <div class="row g-2 mb-2">
+                                                                <div class="col-6">
+                                                                    <label class="form-label">Check every (min)</label>
+                                                                    <input type="number" class="form-control"
+                                                                           name="price_interval"
+                                                                           value="{{ query.price_interval }}"
+                                                                           min="5" max="10080">
+                                                                </div>
+                                                                <div class="col-6">
+                                                                    <label class="form-label">Pages to scan</label>
+                                                                    <input type="number" class="form-control"
+                                                                           name="price_depth"
+                                                                           value="{{ query.price_depth }}"
+                                                                           min="1" max="20">
+                                                                </div>
+                                                            </div>
+                                                            {% if bots %}
+                                                            <label class="form-label">Price bots
+                                                                <span class="text-muted">(optional)</span></label>
+                                                            <select class="form-select" name="price_bot_ids"
+                                                                    multiple size="3">
+                                                                {% for bot in bots %}
+                                                                <option value="{{ bot.id }}"
+                                                                        {% if bot.id in query.price_bot_ids %}selected{% endif %}>
+                                                                    {{ bot.name }}
+                                                                </option>
+                                                                {% endfor %}
+                                                            </select>
+                                                            <div class="form-text">Empty = same bots as new-listing
+                                                                alerts
+                                                            </div>
+                                                            {% endif %}
+                                                        </div>
                                                     </div>
                                                 </div>
                                                 <div class="modal-footer">

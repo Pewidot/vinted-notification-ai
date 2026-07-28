@@ -17,7 +17,11 @@ CREATE TABLE IF NOT EXISTS queries
     telegram_chat_id TEXT,
     telegram_enabled INTEGER DEFAULT 1,
     platform TEXT DEFAULT 'vinted',
-    active INTEGER DEFAULT 1
+    active INTEGER DEFAULT 1,
+    track_prices INTEGER DEFAULT 0,
+    price_interval INTEGER DEFAULT 360,
+    price_depth INTEGER DEFAULT 1,
+    last_price_check NUMERIC DEFAULT 0
 );
 
 -- Items table
@@ -61,6 +65,55 @@ CREATE TABLE IF NOT EXISTS query_telegram_bots
     FOREIGN KEY (bot_id) REFERENCES telegram_bots (id)
 );
 
+-- Which bots receive PRICE messages (may differ from new-listing alerts)
+CREATE TABLE IF NOT EXISTS query_price_bots
+(
+    query_id INTEGER,
+    bot_id   INTEGER,
+    PRIMARY KEY (query_id, bot_id),
+    FOREIGN KEY (query_id) REFERENCES queries (id),
+    FOREIGN KEY (bot_id) REFERENCES telegram_bots (id)
+);
+
+-- Price tracking: current state per tracked listing
+CREATE TABLE IF NOT EXISTS tracked_items
+(
+    item         TEXT,
+    query_id     INTEGER,
+    title        TEXT,
+    url          TEXT,
+    photo_url    TEXT,
+    currency     TEXT,
+    first_price  NUMERIC,
+    last_price   NUMERIC,
+    first_seen   NUMERIC,
+    last_seen    NUMERIC,
+    observations INTEGER DEFAULT 1,
+    -- Auctions change price with every bid: no per-change message, but a
+    -- single alert shortly before they end.
+    is_auction   INTEGER DEFAULT 0,
+    auction_end  NUMERIC DEFAULT 0,
+    ending_notified INTEGER DEFAULT 0,
+    PRIMARY KEY (item, query_id),
+    FOREIGN KEY (query_id) REFERENCES queries (id)
+);
+
+-- Price tracking: one row per observed price
+CREATE TABLE IF NOT EXISTS price_history
+(
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    item      TEXT,
+    query_id  INTEGER,
+    price     NUMERIC,
+    currency  TEXT,
+    timestamp NUMERIC,
+    FOREIGN KEY (query_id) REFERENCES queries (id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_price_history_item ON price_history (item, query_id);
+CREATE INDEX IF NOT EXISTS idx_price_history_time ON price_history (timestamp);
+CREATE INDEX IF NOT EXISTS idx_tracked_items_query ON tracked_items (query_id);
+
 -- Parameters table
 CREATE TABLE IF NOT EXISTS parameters
 (
@@ -83,7 +136,10 @@ VALUES ('telegram_enabled', 'False'),
        ('rss_max_items', '100'),
        ('rss_process_running', 'False'),
 
-       ('version', '1.0.6.2'),
+       ('price_scheduler_interval', '15'),
+       ('price_notify_threshold', '5'),
+
+       ('version', '1.0.6.3'),
        ('github_url', 'https://github.com/Fuyucch1/Vinted-Notifications'),
 
        ('items_per_query', '20'),
