@@ -33,3 +33,8 @@ Thumbs.db
 # Backup files
 *.backup
 *.bak
+
+# Funkeys classifier (separate side project: ~2.7 GB of scraped images,
+# model weights and its own venv - nothing that belongs in this repo)
+funkeys_classifier/
+funkeys_liste.csv

@@ -236,6 +236,17 @@
                                                 <small class="form-text text-muted">Timeout for HTTP requests via proxies (default: 10s)</small>
                                             </div>
                                         </div>
+                                        <div class="col-md-6">
+                                            <div class="mb-3">
+                                                <label for="proxy_blacklist_duration" class="form-label">Blacklist Duration (minutes)</label>
+                                                <input type="number" class="form-control" id="proxy_blacklist_duration"
+                                                       name="proxy_blacklist_duration"
+                                                       value="{{ params.proxy_blacklist_duration or 60 }}" min="1" max="10080">
+                                                <small class="form-text text-muted">How long a failing proxy is skipped before
+                                                    it is retried (default: 60 min). Lower it for small paid pools,
+                                                    raise it for large free lists.</small>
+                                            </div>
+                                        </div>
                                     </div>
                                     <div class="row">
                                         <div class="col-md-6">

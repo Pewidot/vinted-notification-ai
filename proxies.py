@@ -38,8 +38,28 @@ MAX_PROXY_WORKERS = 90
 # Within this window the validated pool is reused (also across restarts, since
 # it is persisted to the database) instead of being re-validated.
 PROXY_RECHECK_INTERVAL = 12 * 60 * 60
-# Time interval to keep a proxy in blacklist (1 hour)
+# Fallback if the configured value is missing/invalid (1 hour)
 PROXY_BLACKLIST_DURATION = 60 * 60
+
+
+def get_blacklist_duration() -> int:
+    """
+    How long a failing proxy stays blacklisted, in seconds.
+
+    Read from the database (stored in minutes) on every call so a change in the
+    config takes effect immediately, in every process, without a restart.
+    """
+    import db
+
+    try:
+        minutes = db.get_parameter("proxy_blacklist_duration")
+        if minutes:
+            seconds = int(float(minutes) * 60)
+            if seconds > 0:
+                return seconds
+    except Exception:
+        pass
+    return PROXY_BLACKLIST_DURATION
 
 
 def _normalize_platform(platform: Optional[str]) -> str:
@@ -533,7 +553,7 @@ def convert_proxy_string_to_dict(proxy: Optional[str]) -> dict:
         return {"http": f"http://{proxy}", "https": f"http://{proxy}"}
 
 
-def blacklist_proxy(proxy: str, platform: str = DEFAULT_PLATFORM, duration: int = PROXY_BLACKLIST_DURATION):
+def blacklist_proxy(proxy: str, platform: str = DEFAULT_PLATFORM, duration: Optional[int] = None):
     """
     Add a proxy to a platform's blacklist to prevent it from being used temporarily.
     Stores in both in-memory cache and database for cross-process access.
@@ -541,10 +561,13 @@ def blacklist_proxy(proxy: str, platform: str = DEFAULT_PLATFORM, duration: int 
     Args:
         proxy (str): Proxy string to blacklist.
         platform (str): The platform the proxy failed on.
-        duration (int): Duration in seconds to keep the proxy blacklisted.
+        duration (int, optional): Seconds to keep the proxy blacklisted.
+            Defaults to the configured value (parameter proxy_blacklist_duration).
     """
     if proxy:
         platform = _normalize_platform(platform)
+        if duration is None:
+            duration = get_blacklist_duration()
         expiration_time = time.time() + duration
         _get_blacklist(platform)[proxy] = expiration_time
         logger.warning(f"[{platform}] Blacklisted proxy: {proxy} (for {duration}s)")
