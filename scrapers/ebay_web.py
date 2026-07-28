@@ -384,13 +384,12 @@ def _fetch(url):
         else:
             break  # direct attempt failed and there is nothing to rotate to
 
-    if proxies_configured:
-        # Every proxy we tried is now blacklisted - pause the platform
-        proxies.mark_pool_exhausted("ebay")
-        raise proxies.NoProxyAvailable(
-            "ebay: all proxies blocked, pausing until the next re-check"
-        )
-    raise RuntimeError("eBay blocked all impersonation profiles")
+    # Running out of attempts is NOT the same as running out of proxies: the
+    # pool may still hold hundreds of untried ones. Only a proxy pool that
+    # actually hands out nothing (handled above) pauses the platform.
+    raise RuntimeError(
+        f"eBay blocked all {MAX_PROXY_ATTEMPTS} attempted proxies for this page"
+    )
 
 
 def parse_html(html, base_netloc="www.ebay.de"):

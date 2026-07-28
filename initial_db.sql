@@ -21,7 +21,9 @@ CREATE TABLE IF NOT EXISTS queries
     track_prices INTEGER DEFAULT 0,
     price_interval INTEGER DEFAULT 360,
     price_depth INTEGER DEFAULT 1,
-    last_price_check NUMERIC DEFAULT 0
+    last_price_check NUMERIC DEFAULT 0,
+    refresh_delay INTEGER,
+    last_scraped NUMERIC DEFAULT 0
 );
 
 -- Items table
@@ -139,7 +141,7 @@ VALUES ('telegram_enabled', 'False'),
        ('price_scheduler_interval', '15'),
        ('price_notify_threshold', '5'),
 
-       ('version', '1.0.6.3'),
+       ('version', '1.0.6.4'),
        ('github_url', 'https://github.com/Fuyucch1/Vinted-Notifications'),
 
        ('items_per_query', '20'),

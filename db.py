@@ -119,7 +119,8 @@ def get_queries():
         cursor = conn.cursor()
         cursor.execute(
             "SELECT id, query, last_item, query_name, telegram_chat_id, telegram_enabled, "
-            "platform, active, track_prices, price_interval, price_depth, last_price_check "
+            "platform, active, track_prices, price_interval, price_depth, last_price_check, "
+            "refresh_delay, last_scraped "
             "FROM queries"
         )
         return cursor.fetchall()
@@ -441,6 +442,87 @@ def set_query_telegram_enabled(query_id, enabled):
 
 
 ### PRICE TRACKING ###
+
+
+def set_query_refresh_delay(query_id, seconds):
+    """
+    Set how often a query is scraped.
+
+    Args:
+        seconds (int or None): interval in seconds; None/0 falls back to the
+            global query_refresh_delay.
+    """
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        value = None
+        if seconds:
+            try:
+                value = max(5, int(seconds))
+            except (TypeError, ValueError):
+                value = None
+        cursor.execute("UPDATE queries SET refresh_delay=? WHERE id=?", (value, query_id))
+        conn.commit()
+        return True
+    except Exception:
+        print_exc()
+        return False
+    finally:
+        if conn:
+            conn.close()
+
+
+def mark_query_scraped(query_id, timestamp=None):
+    """Remember when a query was last scraped (drives its own interval)."""
+    import time as _time
+
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE queries SET last_scraped=? WHERE id=?",
+            (timestamp if timestamp is not None else _time.time(), query_id),
+        )
+        conn.commit()
+        return True
+    except Exception:
+        print_exc()
+        return False
+    finally:
+        if conn:
+            conn.close()
+
+
+def get_scraper_tick_seconds(floor=10):
+    """
+    How often the scraper loop should wake up.
+
+    Must be at least as fine-grained as the fastest query, otherwise a query set
+    to 30s would still only run at the global interval.
+    """
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM parameters WHERE key='query_refresh_delay'")
+        row = cursor.fetchone()
+        delays = [int(row[0])] if row and row[0] else [60]
+        cursor.execute(
+            "SELECT MIN(refresh_delay) FROM queries"
+            " WHERE COALESCE(active,1)=1 AND refresh_delay IS NOT NULL AND refresh_delay > 0"
+        )
+        row = cursor.fetchone()
+        if row and row[0]:
+            delays.append(int(row[0]))
+        return max(floor, min(delays))
+    except Exception:
+        print_exc()
+        return 60
+    finally:
+        if conn:
+            conn.close()
 
 
 def set_query_price_tracking(query_id, enabled, interval=None, depth=None):

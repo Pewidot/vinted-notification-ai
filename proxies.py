@@ -219,17 +219,49 @@ def has_proxies_configured(platform: str) -> bool:
     return False
 
 
+def usable_proxy_count(platform: str) -> int:
+    """
+    How many proxies of this platform are currently usable (pool minus blacklist).
+
+    Reads the persisted pool so the answer is the same in every process.
+    """
+    import db
+
+    platform = _normalize_platform(platform)
+    pool = _PROXY_CACHE.get(platform)
+    if not pool:
+        persisted = db.get_parameter(_pkey("validated_proxies", platform))
+        pool = [p.strip() for p in persisted.split(";") if p.strip()] if persisted else []
+    if not pool:
+        return 0
+    blacklist = _get_blacklist(platform)
+    return sum(1 for p in pool if p not in blacklist)
+
+
 def mark_pool_exhausted(platform: str):
     """
-    Remember that this platform currently has no usable proxy.
+    Pause a platform because it has no usable proxy left.
 
-    Stored in the database so every process observes the same pause.
+    Guarded on purpose: failing a handful of fetch attempts does NOT mean the
+    pool is empty - it may still hold hundreds of untried proxies. Pausing in
+    that case would stop the platform for an hour for no reason, so the pool is
+    verified before the pause is recorded.
     """
     import db
 
     platform = _normalize_platform(platform)
     if db.get_parameter(_pkey("proxy_exhausted_at", platform)):
         return  # already paused - keep the original timestamp
+
+    _sync_blacklist(platform, max_age=0)  # make sure the blacklist is current
+    remaining = usable_proxy_count(platform)
+    if remaining > 0:
+        logger.warning(
+            f"[{platform}] Fetch attempts failed, but {remaining} proxies are still "
+            f"usable - not pausing the platform"
+        )
+        return
+
     db.set_parameter(_pkey("proxy_exhausted_at", platform), str(time.time()))
     logger.error(
         f"[{platform}] No usable proxy left - pausing this platform for "
@@ -739,6 +771,8 @@ def reset_all_proxy_data():
         db.set_parameter(_pkey("validated_proxies", platform), "")
         db.set_parameter(_pkey("validated_proxy_count", platform), "0")
         db.set_parameter(_pkey("proxy_blacklist", platform), "")
+        # Lift any pause so the reset button recovers a stuck platform
+        db.set_parameter(_pkey("proxy_exhausted_at", platform), "")
         # Force a full re-validation on next use (epoch 1 is always > 12h ago)
         db.set_parameter(_pkey("last_proxy_check_time", platform), "1")
         _PROXY_CACHE.pop(platform, None)

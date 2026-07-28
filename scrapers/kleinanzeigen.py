@@ -210,12 +210,9 @@ def _fetch(url):
             if current_proxy:
                 proxies.blacklist_proxy(current_proxy, "kleinanzeigen")
 
-    if proxies_configured:
-        # Every proxy we tried is now blacklisted - pause the platform
-        proxies.mark_pool_exhausted("kleinanzeigen")
-        raise proxies.NoProxyAvailable(
-            "kleinanzeigen: all proxies blocked, pausing until the next re-check"
-        )
+    # Running out of attempts is NOT the same as running out of proxies: the
+    # pool may still hold hundreds of untried ones. Only a proxy pool that
+    # actually hands out nothing (handled above) pauses the platform.
     raise requests.HTTPError(
         f"Failed to fetch Kleinanzeigen page after {MAX_PROXY_RETRIES} attempts: {last_error}"
     )
