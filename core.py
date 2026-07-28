@@ -63,18 +63,22 @@ def normalize_query_for_platform(query, platform):
     return None, None  # vinted is normalized by the caller (process_query/process_update_query)
 
 
-def _apply_price_settings(query_id, track_prices, price_interval, price_depth, price_bot_ids):
-    """Persist the price-tracking options of a query (shared by add and update)."""
+def _apply_price_settings(query_id, track_prices, price_interval, price_depth, price_bot_ids,
+                          refresh_delay=None):
+    """Persist the per-query options shared by add and update."""
     if track_prices is not None:
         db.set_query_price_tracking(
             query_id, track_prices, interval=price_interval, depth=price_depth
         )
     if price_bot_ids is not None:
         db.set_query_price_bots(query_id, price_bot_ids)
+    if refresh_delay is not None:
+        db.set_query_refresh_delay(query_id, refresh_delay)
 
 
 def process_query(query, name=None, telegram_chat_id=None, platform="vinted", bot_ids=None,
-                  track_prices=None, price_interval=None, price_depth=None, price_bot_ids=None):
+                  track_prices=None, price_interval=None, price_depth=None, price_bot_ids=None,
+                  refresh_delay=None):
     """
     Process a query for the given platform and add it to the database.
 
@@ -113,7 +117,8 @@ def process_query(query, name=None, telegram_chat_id=None, platform="vinted", bo
         if new_id is not None:
             if bot_ids is not None:
                 db.set_query_bots(new_id, bot_ids)
-            _apply_price_settings(new_id, track_prices, price_interval, price_depth, price_bot_ids)
+            _apply_price_settings(new_id, track_prices, price_interval, price_depth,
+                                  price_bot_ids, refresh_delay)
         return "Query added.", True
 
     # Check if the URL is a brand URL (format: url/brand/id-name)
@@ -172,7 +177,8 @@ def process_query(query, name=None, telegram_chat_id=None, platform="vinted", bo
         if new_id is not None:
             if bot_ids is not None:
                 db.set_query_bots(new_id, bot_ids)
-            _apply_price_settings(new_id, track_prices, price_interval, price_depth, price_bot_ids)
+            _apply_price_settings(new_id, track_prices, price_interval, price_depth,
+                                  price_bot_ids, refresh_delay)
         return "Query added.", True
 
 
@@ -238,7 +244,7 @@ def process_remove_query(number):
 
 def process_update_query(query_id, query, name, telegram_chat_id=None, bot_ids=None,
                          track_prices=None, price_interval=None, price_depth=None,
-                         price_bot_ids=None):
+                         price_bot_ids=None, refresh_delay=None):
     """
     Process the update of a query in the database.
 
@@ -264,7 +270,8 @@ def process_update_query(query_id, query, name, telegram_chat_id=None, bot_ids=N
         if db.update_query_in_db(query_id, processed_query, name, telegram_chat_id):
             if bot_ids is not None:
                 db.set_query_bots(query_id, bot_ids)
-            _apply_price_settings(query_id, track_prices, price_interval, price_depth, price_bot_ids)
+            _apply_price_settings(query_id, track_prices, price_interval, price_depth,
+                              price_bot_ids, refresh_delay)
             return "Query updated.", True
         return "Failed to update query.", False
 
@@ -297,7 +304,8 @@ def process_update_query(query_id, query, name, telegram_chat_id=None, bot_ids=N
     if db.update_query_in_db(query_id, processed_query, name, telegram_chat_id):
         if bot_ids is not None:
             db.set_query_bots(query_id, bot_ids)
-        _apply_price_settings(query_id, track_prices, price_interval, price_depth, price_bot_ids)
+        _apply_price_settings(query_id, track_prices, price_interval, price_depth,
+                              price_bot_ids, refresh_delay)
         return "Query updated.", True
     else:
         return "Failed to update query.", False
@@ -412,6 +420,9 @@ def _scrape_platform_queries(platform, queries, items_per_query, queue, price_qu
     threshold = get_price_threshold()
 
     for query in queries:
+        # Stamp before scraping: a query that keeps failing must not be retried
+        # on every single tick, it waits for its own interval like the others.
+        db.mark_query_scraped(query[0])
         try:
             logger.info(f"[{platform.upper()}] Scraping query {query[0]}: {query[1]}")
 
@@ -482,7 +493,18 @@ def process_items(queue, price_queue=None):
     # Get the number of items per query from the database
     items_per_query = int(db.get_parameter("items_per_query"))
 
-    # Group active queries by platform
+    # Each query may define its own refresh interval; the global setting is the
+    # default. The scheduler ticks faster than the shortest interval, so this
+    # decides which queries are actually due right now.
+    import time as _time
+
+    now = _time.time()
+    try:
+        default_delay = int(db.get_parameter("query_refresh_delay") or 60)
+    except (TypeError, ValueError):
+        default_delay = 60
+
+    # Group active, due queries by platform
     queries_by_platform = defaultdict(list)
     for query in all_queries:
         platform = (query[6] if len(query) > 6 and query[6] else "vinted").lower()
@@ -491,6 +513,12 @@ def process_items(queue, price_queue=None):
         if not active:
             logger.debug(f"[{platform.upper()}] Skipping paused query {query[0]}")
             continue
+
+        delay = query[12] if len(query) > 12 and query[12] else default_delay
+        last_scraped = query[13] if len(query) > 13 and query[13] else 0
+        if last_scraped and (now - float(last_scraped)) < int(delay):
+            continue  # not due yet
+
         queries_by_platform[platform].append(query)
 
     if not queries_by_platform:

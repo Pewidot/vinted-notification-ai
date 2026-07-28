@@ -668,10 +668,14 @@ def record_price(item, query_id, price, currency="EUR", title=None, url=None,
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
+        # Each currency is its own series: the same listing shown in GBP and in
+        # converted EUR must not be compared, or every exchange-rate move would
+        # look like a price change.
+        currency = (currency or "EUR").upper()
         cursor.execute(
             "SELECT last_price, observations, currency FROM tracked_items"
-            " WHERE item=? AND query_id=?",
-            (item, query_id),
+            " WHERE item=? AND query_id=? AND currency=?",
+            (item, query_id, currency),
         )
         row = cursor.fetchone()
 
@@ -700,22 +704,19 @@ def record_price(item, query_id, price, currency="EUR", title=None, url=None,
         # the observation is ignored entirely: no history row (it would mix
         # currencies in one series) and no change to last_price. Only the
         # "seen" bookkeeping is updated below.
-        # Same reasoning for the net/gross flip: eBay shows some listings with
-        # VAT and some without, so an unchanged listing appears to jump by
-        # exactly the VAT rate (e.g. 39.58 <-> 47.10 = x1.19).
-        ignore_reason = None
-        if old_currency and currency and old_currency != currency:
-            ignore_reason = "currency_switch"
-        elif looks_like_vat_switch(old_price, price):
-            ignore_reason = "vat_switch"
+        # Within one currency the remaining artefact is the net/gross flip:
+        # eBay shows some listings with VAT and some without, so an unchanged
+        # listing appears to jump by exactly the VAT rate
+        # (e.g. 39.58 <-> 47.10 = x1.19).
+        ignore_reason = "vat_switch" if looks_like_vat_switch(old_price, price) else None
 
         if ignore_reason:
             cursor.execute(
                 "UPDATE tracked_items SET last_seen=?, observations=observations+1,"
                 " title=COALESCE(?, title), url=COALESCE(?, url),"
                 " photo_url=COALESCE(?, photo_url)"
-                " WHERE item=? AND query_id=?",
-                (ts, title, url, photo_url, item, query_id),
+                " WHERE item=? AND query_id=? AND currency=?",
+                (ts, title, url, photo_url, item, query_id, currency),
             )
             conn.commit()
             return ignore_reason, old_price, price
@@ -747,9 +748,10 @@ def record_price(item, query_id, price, currency="EUR", title=None, url=None,
                 status = "currency_switch"
             else:
                 cursor.execute(
-                    "SELECT price FROM price_history WHERE item=? AND query_id=?"
+                    "SELECT price FROM price_history"
+                    " WHERE item=? AND query_id=? AND currency=?"
                     " ORDER BY timestamp DESC, id DESC LIMIT 4",
-                    (item, query_id),
+                    (item, query_id, currency),
                 )
                 recent = [r[0] for r in cursor.fetchall()]
                 # recent[0] is the row just inserted; anything further back that
@@ -760,9 +762,9 @@ def record_price(item, query_id, price, currency="EUR", title=None, url=None,
             "UPDATE tracked_items SET last_price=?, last_seen=?, observations=observations+1,"
             " title=COALESCE(?, title), url=COALESCE(?, url), photo_url=COALESCE(?, photo_url),"
             " is_auction=?, auction_end=CASE WHEN ?>0 THEN ? ELSE auction_end END"
-            " WHERE item=? AND query_id=?",
+            " WHERE item=? AND query_id=? AND currency=?",
             (price, ts, title, url, photo_url, 1 if is_auction else 0,
-             auction_end or 0, auction_end or 0, item, query_id),
+             auction_end or 0, auction_end or 0, item, query_id, currency),
         )
         conn.commit()
         return status, old_price, price
@@ -793,10 +795,12 @@ def get_auctions_ending_soon(within_seconds=600, now=None):
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT item, query_id, title, url, photo_url, last_price, currency, auction_end"
-            " FROM tracked_items"
+            # One alert per listing even if it is tracked in several currencies
+            "SELECT item, query_id, title, url, photo_url, last_price, currency,"
+            " MAX(auction_end) FROM tracked_items"
             " WHERE is_auction=1 AND COALESCE(ending_notified,0)=0"
-            " AND auction_end > ? AND auction_end <= ?",
+            " AND auction_end > ? AND auction_end <= ?"
+            " GROUP BY item, query_id",
             (now, now + within_seconds),
         )
         return cursor.fetchall()
@@ -828,24 +832,29 @@ def mark_auction_notified(item, query_id):
             conn.close()
 
 
-def get_price_history(item, query_id=None, limit=500):
-    """All recorded prices for a listing, oldest first."""
+def get_price_history(item, query_id=None, limit=500, currency=None):
+    """
+    Recorded prices for a listing, oldest first.
+
+    Pass `currency` to get one clean series: a listing offered in several
+    currencies has an independent history per currency, and mixing them would
+    show exchange-rate moves as price changes.
+    """
     conn = None
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        if query_id is None:
-            cursor.execute(
-                "SELECT price, currency, timestamp FROM price_history WHERE item=?"
-                " ORDER BY timestamp LIMIT ?",
-                (str(item), limit),
-            )
-        else:
-            cursor.execute(
-                "SELECT price, currency, timestamp FROM price_history"
-                " WHERE item=? AND query_id=? ORDER BY timestamp LIMIT ?",
-                (str(item), query_id, limit),
-            )
+        sql = "SELECT price, currency, timestamp FROM price_history WHERE item=?"
+        params = [str(item)]
+        if query_id is not None:
+            sql += " AND query_id=?"
+            params.append(query_id)
+        if currency:
+            sql += " AND currency=?"
+            params.append(currency.upper())
+        sql += " ORDER BY timestamp LIMIT ?"
+        params.append(limit)
+        cursor.execute(sql, params)
         return cursor.fetchall()
     except Exception:
         print_exc()

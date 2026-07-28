@@ -74,6 +74,16 @@
                             {% endif %}
                         </div>
 
+                        <!-- Refresh interval (optional) -->
+                        <div class="col-md-2">
+                            <label for="refresh_delay" class="form-label">Refresh (sec)&nbsp;<span
+                                    class="text-muted">(optional)</span></label>
+                            <input type="number" class="form-control" id="refresh_delay"
+                                   name="refresh_delay" min="5" max="86400"
+                                   placeholder="{{ params.query_refresh_delay or 60 }}">
+                            <div class="form-text">Empty = global default</div>
+                        </div>
+
                         <div class="col-md-2 d-flex align-items-center">
                             <button type="submit" class="btn btn-primary w-100">Add Query</button>
                         </div>
@@ -297,6 +307,20 @@
                                                             No bots configured. <a href="/telegram_bots">Add one</a>.
                                                         </div>
                                                         {% endif %}
+                                                    </div>
+
+                                                    <div class="mb-3">
+                                                        <label for="refresh_delay{{ query.id }}"
+                                                               class="form-label">Refresh interval (seconds)
+                                                            <span class="text-muted">(optional)</span></label>
+                                                        <input type="number" class="form-control"
+                                                               id="refresh_delay{{ query.id }}"
+                                                               name="refresh_delay" min="5" max="86400"
+                                                               value="{{ query.refresh_delay or '' }}"
+                                                               placeholder="{{ params.query_refresh_delay or 60 }} (global default)">
+                                                        <div class="form-text">Leave empty to use the global
+                                                            default
+                                                        </div>
                                                     </div>
 
                                                     <div class="border-top pt-3">

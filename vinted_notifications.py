@@ -32,9 +32,14 @@ current_query_refresh_delay = None
 def scraper_process(items_queue, price_queue=None):
     logger.info("Scrape process started")
 
-    # Get the query refresh delay from the database
-    current_query_refresh_delay = int(db.get_parameter("query_refresh_delay"))
-    logger.info(f"Using query refresh delay of {current_query_refresh_delay} seconds")
+    # The loop ticks at least as often as the fastest query wants to run;
+    # process_items() then decides which queries are actually due.
+    current_query_refresh_delay = db.get_scraper_tick_seconds()
+    logger.info(
+        f"Scraper ticks every {current_query_refresh_delay}s "
+        f"(each query uses its own interval, default "
+        f"{db.get_parameter('query_refresh_delay')}s)"
+    )
 
     scraper_scheduler = BackgroundScheduler()
     scraper_scheduler.add_job(
@@ -133,14 +138,15 @@ def check_refresh_delay(items_queue, price_queue=None):
     if scrape_process is None or not scrape_process.is_alive():
         return
 
-    # Get the current value from the database
+    # Recompute the tick: it must follow both the global default and the
+    # fastest per-query interval, so adding a faster query takes effect too.
     try:
-        new_delay = int(db.get_parameter("query_refresh_delay"))
+        new_delay = db.get_scraper_tick_seconds()
 
-        # If the delay has changed, update the scheduler
+        # If the tick has changed, restart the scraper with the new interval
         if new_delay != current_query_refresh_delay:
             logger.info(
-                f"Query refresh delay changed from {current_query_refresh_delay} to {new_delay} seconds"
+                f"Scraper tick changed from {current_query_refresh_delay} to {new_delay} seconds"
             )
 
             # Update the global variable
@@ -155,7 +161,7 @@ def check_refresh_delay(items_queue, price_queue=None):
             scrape_process.start()
 
             logger.info(
-                f"Scheduler updated with new refresh delay of {new_delay} seconds"
+                f"Scraper restarted with a {new_delay}s tick"
             )
     except Exception as e:
         logger.error(f"Error updating refresh delay: {e}", exc_info=True)

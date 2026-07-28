@@ -198,6 +198,7 @@ def queries():
                 "price_interval": (query[9] if len(query) > 9 and query[9] else 360),
                 "price_depth": (query[10] if len(query) > 10 and query[10] else 1),
                 "price_bot_ids": [b[0] for b in price_bots],
+                "refresh_delay": (query[12] if len(query) > 12 and query[12] else None),
             }
         )
 
@@ -206,7 +207,8 @@ def queries():
         {"id": b[0], "name": b[1], "enabled": bool(b[4]), "is_command_bot": bool(b[5])}
         for b in all_bots
     ]
-    return render_template("queries.html", queries=formatted_queries, bots=bots)
+    return render_template("queries.html", queries=formatted_queries, bots=bots,
+                           params=db.get_all_parameters())
 
 
 @app.route("/add_query", methods=["POST"])
@@ -221,6 +223,7 @@ def add_query():
     track_prices = "track_prices" in request.form
     price_interval = request.form.get("price_interval", 360, type=int) or 360
     price_depth = request.form.get("price_depth", 1, type=int) or 1
+    refresh_delay = request.form.get("refresh_delay", type=int)
     if query:
         message, is_new_query = core.process_query(
             query,
@@ -231,6 +234,7 @@ def add_query():
             price_interval=price_interval,
             price_depth=price_depth,
             price_bot_ids=price_bot_ids,
+            refresh_delay=refresh_delay,
         )
         if is_new_query:
             flash(f"Query added: {query}", "success")
@@ -273,6 +277,7 @@ def update_query(query_id):
     track_prices = "track_prices" in request.form
     price_interval = request.form.get("price_interval", 360, type=int) or 360
     price_depth = request.form.get("price_depth", 1, type=int) or 1
+    refresh_delay = request.form.get("refresh_delay", type=int)
 
     if query:
         message, success = core.process_update_query(
@@ -284,6 +289,7 @@ def update_query(query_id):
             price_interval=price_interval,
             price_depth=price_depth,
             price_bot_ids=price_bot_ids,
+            refresh_delay=refresh_delay,
         )
         if success:
             flash("Query updated", "success")
@@ -509,7 +515,9 @@ def prices():
             change_pct = ((last_price - first_price) / first_price * 100) if first_price else 0
         except (TypeError, ZeroDivisionError):
             change_pct = 0
-        history = db.get_price_history(item, qid)
+        # Per-currency series: mixing currencies would render exchange-rate
+        # moves as price swings
+        history = db.get_price_history(item, qid, currency=currency)
         items.append({
             "item": item,
             "query_id": qid,

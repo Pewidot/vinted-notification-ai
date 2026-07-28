@@ -82,10 +82,13 @@ CREATE TABLE IF NOT EXISTS tracked_items
 (
     item         TEXT,
     query_id     INTEGER,
+    -- Part of the key: a listing shown in several currencies keeps one
+    -- independent series per currency, so exchange-rate moves never look
+    -- like price changes.
+    currency     TEXT,
     title        TEXT,
     url          TEXT,
     photo_url    TEXT,
-    currency     TEXT,
     first_price  NUMERIC,
     last_price   NUMERIC,
     first_seen   NUMERIC,
@@ -96,7 +99,7 @@ CREATE TABLE IF NOT EXISTS tracked_items
     is_auction   INTEGER DEFAULT 0,
     auction_end  NUMERIC DEFAULT 0,
     ending_notified INTEGER DEFAULT 0,
-    PRIMARY KEY (item, query_id),
+    PRIMARY KEY (item, query_id, currency),
     FOREIGN KEY (query_id) REFERENCES queries (id)
 );
 
@@ -112,7 +115,7 @@ CREATE TABLE IF NOT EXISTS price_history
     FOREIGN KEY (query_id) REFERENCES queries (id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_price_history_item ON price_history (item, query_id);
+CREATE INDEX IF NOT EXISTS idx_price_history_item ON price_history (item, query_id, currency);
 CREATE INDEX IF NOT EXISTS idx_price_history_time ON price_history (timestamp);
 CREATE INDEX IF NOT EXISTS idx_tracked_items_query ON tracked_items (query_id);
 
@@ -141,7 +144,7 @@ VALUES ('telegram_enabled', 'False'),
        ('price_scheduler_interval', '15'),
        ('price_notify_threshold', '5'),
 
-       ('version', '1.0.6.4'),
+       ('version', '1.0.6.5'),
        ('github_url', 'https://github.com/Fuyucch1/Vinted-Notifications'),
 
        ('items_per_query', '20'),
