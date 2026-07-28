@@ -41,7 +41,7 @@ def scraper_process(items_queue, price_queue=None):
         core.process_items,
         "interval",
         seconds=current_query_refresh_delay,
-        args=[items_queue],
+        args=[items_queue, price_queue],
         name="scraper",
     )
 
@@ -293,7 +293,9 @@ if __name__ == "__main__":
 
     # 5. Create and start the Web UI process
     # This process will provide a web interface to control the application
-    web_ui_process_instance = multiprocessing.Process(target=web_ui_process)
+    web_ui_process_instance = multiprocessing.Process(
+        target=web_ui_process, args=(price_queue,)
+    )
     web_ui_process_instance.start()
 
     try:

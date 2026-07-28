@@ -391,7 +391,7 @@ def get_user_country(profile_id):
     return user_country
 
 
-def _scrape_platform_queries(platform, queries, items_per_query, queue):
+def _scrape_platform_queries(platform, queries, items_per_query, queue, price_queue=None):
     """
     Scrape all queries of a single platform sequentially and put results on the
     queue. Runs in its own thread so the three platforms scrape in parallel.
@@ -405,9 +405,11 @@ def _scrape_platform_queries(platform, queries, items_per_query, queue):
         queries (list): Query rows for this platform
         items_per_query (int): Number of items to request per query
         queue (Queue): Queue to put (data, query_id) results on
+        price_queue (Queue, optional): queue for price-change notifications
     """
     # Create a Vinted instance only for the vinted worker (uses singleton requester)
     vinted = Vinted() if platform == "vinted" else None
+    threshold = get_price_threshold()
 
     for query in queries:
         try:
@@ -434,13 +436,30 @@ def _scrape_platform_queries(platform, queries, items_per_query, queue):
             )
             queue.put((data, query[0]))
 
+            # This page was fetched anyway - if the query tracks prices, feed
+            # everything on it into the history instead of re-requesting it
+            # later. Costs no extra request.
+            if len(query) > 8 and query[8] and all_items:
+                # The items in `data` are on their way to the notification
+                # pipeline, which indexes them itself - indexing them here first
+                # would make that pipeline skip them as "already seen".
+                s, n, c, i = record_items_prices(
+                    query[0], all_items, price_queue, threshold,
+                    skip_index_ids={str(it.id) for it in data},
+                )
+                if c or i:
+                    logger.info(
+                        f"[{platform.upper()}] Price tracking (from regular scrape) "
+                        f"query {query[0]}: {c} change(s), {i} newly indexed"
+                    )
+
         except Exception as e:
             logger.error(f"[{platform.upper()}] Error processing query {query[0]}: {e}")
             # Put empty result on error
             queue.put(([], query[0]))
 
 
-def process_items(queue):
+def process_items(queue, price_queue=None):
     """
     Scrape all active queries and put their results on the queue.
 
@@ -481,7 +500,7 @@ def process_items(queue):
     threads = [
         threading.Thread(
             target=_scrape_platform_queries,
-            args=(platform, queries, items_per_query, queue),
+            args=(platform, queries, items_per_query, queue, price_queue),
             name=f"scraper-{platform}",
             daemon=True,
         )
@@ -511,124 +530,184 @@ def scrape_page(platform, query, page, nbr_items):
     return Vinted().items.search(query, nbr_items=nbr_items, page=page)
 
 
+def get_price_threshold():
+    """Minimum percentage move before a price change is worth announcing."""
+    try:
+        return float(db.get_parameter("price_notify_threshold") or 5)
+    except (TypeError, ValueError):
+        return 5.0
+
+
+def record_items_prices(query_id, items, price_queue=None, threshold=None,
+                        skip_index_ids=None):
+    """
+    Record prices for a batch of already-scraped listings.
+
+    Shared by the deep price runs and the normal scrape: whatever the regular
+    scraper fetched is free data, so it is fed into the price history too
+    instead of being re-requested later.
+
+    Listings that are not in the database yet are indexed with their real
+    publish time and WITHOUT advancing the query watermark, so this never fires
+    a "new listing" notification and never hides genuinely new listings.
+
+    Args:
+        skip_index_ids (set, optional): ids that must NOT be indexed here
+            because the notification pipeline is about to handle them. Without
+            this, indexing a brand-new listing would make clear_item_queue treat
+            it as already known and silently drop its notification.
+
+    Returns:
+        tuple: (seen, new, changed, indexed)
+    """
+    if threshold is None:
+        threshold = get_price_threshold()
+    skip_index_ids = skip_index_ids or set()
+    seen = new = changed = indexed = 0
+
+    for item in items:
+        price = getattr(item, "price", None)
+        if price is None:
+            continue
+
+        if str(item.id) not in skip_index_ids and not db.is_item_in_db_by_id(item.id):
+            db.add_item_to_db(
+                id=item.id,
+                title=getattr(item, "title", None),
+                query_id=query_id,
+                price=float(price),
+                timestamp=getattr(item, "raw_timestamp", 0) or 0,
+                photo_url=getattr(item, "photo", None),
+                currency=getattr(item, "currency", "EUR"),
+                url=getattr(item, "url", None),
+                update_last_item=False,
+            )
+            indexed += 1
+
+        is_auction = bool(getattr(item, "is_auction", False))
+        status, old_price, new_price = db.record_price(
+            item=item.id,
+            query_id=query_id,
+            price=float(price),
+            currency=getattr(item, "currency", "EUR"),
+            title=getattr(item, "title", None),
+            url=getattr(item, "url", None),
+            photo_url=getattr(item, "photo", None),
+            is_auction=is_auction,
+            auction_end=getattr(item, "auction_end", 0),
+        )
+        seen += 1
+        if status == "new":
+            new += 1
+        elif status == "changed":
+            changed += 1
+            # Auction prices move with every bid - the history is still
+            # recorded, but announcing each bid would be noise. Auctions get a
+            # single alert shortly before they end instead.
+            if is_auction:
+                continue
+            if price_queue is not None and old_price:
+                pct = (float(new_price) - float(old_price)) / float(old_price) * 100
+                if abs(pct) >= threshold:
+                    price_queue.put({
+                        "type": "price_change",
+                        "query_id": query_id,
+                        "title": getattr(item, "title", "") or "",
+                        "url": getattr(item, "url", "") or "",
+                        "photo": getattr(item, "photo", None),
+                        "old_price": float(old_price),
+                        "new_price": float(new_price),
+                        "currency": getattr(item, "currency", "EUR"),
+                        "pct": pct,
+                    })
+    return seen, new, changed, indexed
+
+
+def run_price_check(query_id, query, platform, depth, price_queue=None,
+                    items_per_query=None, threshold=None):
+    """
+    Walk `depth` result pages for one query and record every price found.
+
+    Page 1 only ever shows the newest listings; the older ones - and their price
+    changes - live further back, which is why depth matters here.
+    """
+    import time as _time
+
+    platform = (platform or "vinted").lower()
+    depth = max(1, int(depth or 1))
+    if items_per_query is None:
+        items_per_query = int(db.get_parameter("items_per_query") or 20)
+    if threshold is None:
+        threshold = get_price_threshold()
+
+    seen = new = changed = indexed = 0
+    try:
+        for page in range(1, depth + 1):
+            try:
+                items = scrape_page(platform, query, page, items_per_query)
+            except Exception as e:
+                logger.warning(
+                    f"[PRICES] {platform} query {query_id} page {page} failed: {str(e)[:120]}"
+                )
+                break
+            if not items:
+                break  # no more results - stop paging
+
+            s, n, c, i = record_items_prices(query_id, items, price_queue, threshold)
+            seen += s
+            new += n
+            changed += c
+            indexed += i
+
+            # Be gentle between pages - deep runs otherwise look like a burst
+            if page < depth:
+                _time.sleep(2)
+    finally:
+        # Always advance the timer, even after an error, so one broken query
+        # cannot monopolise every following run.
+        db.update_last_price_check(query_id)
+
+    logger.info(
+        f"[PRICES] query {query_id} ({platform}): {seen} listings checked, "
+        f"{new} newly tracked, {indexed} indexed into items, {changed} price change(s)"
+    )
+    return {"seen": seen, "new": new, "changed": changed, "indexed": indexed}
+
+
 def collect_prices(price_queue=None):
     """
-    Price tracking run: for every query that is due, walk `price_depth` result
-    pages and record the price of each listing found.
-
-    Deliberately separate from process_items(): that one only reports *new*
-    listings, while price tracking re-reads listings that are already known.
-    Walking deeper pages is what makes history possible - page 1 only ever shows
-    the newest listings, the older ones (and their price changes) live further back.
+    Scheduler entry point: run a price check for every query that is due.
 
     Args:
         price_queue (Queue, optional): queue for price-change notifications
     """
-    import time as _time
-
     due = db.get_queries_due_for_price_check()
-    if not due:
-        return
-
-    items_per_query = int(db.get_parameter("items_per_query") or 20)
-    try:
-        threshold = float(db.get_parameter("price_notify_threshold") or 5)
-    except (TypeError, ValueError):
-        threshold = 5.0
-
-    logger.info(f"[PRICES] {len(due)} query/queries due for a price check")
-
-    for query_id, query, platform, depth, interval in due:
-        platform = (platform or "vinted").lower()
-        depth = max(1, int(depth or 1))
-        seen = changed = new = indexed = 0
-        try:
-            for page in range(1, depth + 1):
-                try:
-                    items = scrape_page(platform, query, page, items_per_query)
-                except Exception as e:
-                    logger.warning(
-                        f"[PRICES] {platform} query {query_id} page {page} failed: {str(e)[:120]}"
-                    )
-                    break
-                if not items:
-                    break  # no more results - stop paging
-
-                for item in items:
-                    price = getattr(item, "price", None)
-                    if price is None:
-                        continue
-
-                    # Index every listing we come across, including ones the
-                    # normal scraper never saw (they sit on older pages). Stored
-                    # with their real publish time and WITHOUT advancing the
-                    # query watermark, so this indexing never fires a
-                    # notification and never hides genuinely new listings.
-                    if not db.is_item_in_db_by_id(item.id):
-                        db.add_item_to_db(
-                            id=item.id,
-                            title=getattr(item, "title", None),
-                            query_id=query_id,
-                            price=float(price),
-                            timestamp=getattr(item, "raw_timestamp", 0) or 0,
-                            photo_url=getattr(item, "photo", None),
-                            currency=getattr(item, "currency", "EUR"),
-                            url=getattr(item, "url", None),
-                            update_last_item=False,
-                        )
-                        indexed += 1
-
-                    is_auction = bool(getattr(item, "is_auction", False))
-                    status, old_price, new_price = db.record_price(
-                        item=item.id,
-                        query_id=query_id,
-                        price=float(price),
-                        currency=getattr(item, "currency", "EUR"),
-                        title=getattr(item, "title", None),
-                        url=getattr(item, "url", None),
-                        photo_url=getattr(item, "photo", None),
-                        is_auction=is_auction,
-                        auction_end=getattr(item, "auction_end", 0),
-                    )
-                    seen += 1
-                    if status == "new":
-                        new += 1
-                    elif status == "changed":
-                        changed += 1
-                        # Auction prices move with every bid - the history is
-                        # still recorded, but announcing each bid would be noise.
-                        # Auctions get a single alert shortly before they end.
-                        if is_auction:
-                            continue
-                        if price_queue is not None and old_price:
-                            pct = (float(new_price) - float(old_price)) / float(old_price) * 100
-                            if abs(pct) >= threshold:
-                                price_queue.put({
-                                    "type": "price_change",
-                                    "query_id": query_id,
-                                    "title": getattr(item, "title", "") or "",
-                                    "url": getattr(item, "url", "") or "",
-                                    "photo": getattr(item, "photo", None),
-                                    "old_price": float(old_price),
-                                    "new_price": float(new_price),
-                                    "currency": getattr(item, "currency", "EUR"),
-                                    "pct": pct,
-                                })
-                # Be gentle between pages - deep runs otherwise look like a burst
-                if page < depth:
-                    _time.sleep(2)
-        finally:
-            # Always advance the timer, even after an error, so one broken query
-            # cannot monopolise every following run.
-            db.update_last_price_check(query_id)
-
-        logger.info(
-            f"[PRICES] query {query_id} ({platform}): {seen} listings checked, "
-            f"{new} newly tracked, {indexed} indexed into items, {changed} price change(s)"
-        )
+    if due:
+        items_per_query = int(db.get_parameter("items_per_query") or 20)
+        threshold = get_price_threshold()
+        logger.info(f"[PRICES] {len(due)} query/queries due for a price check")
+        for query_id, query, platform, depth, interval in due:
+            run_price_check(query_id, query, platform, depth, price_queue,
+                            items_per_query, threshold)
 
     # After the runs: announce auctions about to close (once each)
     notify_ending_auctions(price_queue)
+
+
+def collect_prices_for_query(query_id, price_queue=None):
+    """
+    Run a price check for a single query right now, ignoring its interval.
+    Used by the "update prices now" button in the web UI.
+    """
+    for q in db.get_queries():
+        if q[0] == query_id:
+            result = run_price_check(
+                query_id, q[1], q[6] if len(q) > 6 else "vinted",
+                q[10] if len(q) > 10 else 1, price_queue,
+            )
+            notify_ending_auctions(price_queue)
+            return result
+    return None
 
 
 def notify_ending_auctions(price_queue=None, within_minutes=10):

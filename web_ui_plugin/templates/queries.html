@@ -213,6 +213,15 @@
                                         </button>
                                         {% endif %}
                                     </form>
+                                    {% if query.track_prices %}
+                                    <form action="/update_prices/{{ query.query_id }}" method="post"
+                                          class="d-inline">
+                                        <button type="submit" class="btn btn-sm btn-outline-info"
+                                                title="Check prices for this query right now">
+                                            <i class="bi bi-arrow-repeat"></i> Update Prices
+                                        </button>
+                                    </form>
+                                    {% endif %}
                                     <a href="/items?query={{ query.query_id }}"
                                        class="btn btn-sm btn-outline-primary">
                                         <i class="bi bi-box"></i> View Items

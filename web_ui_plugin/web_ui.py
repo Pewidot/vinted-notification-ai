@@ -23,6 +23,10 @@ app = Flask(
 # Secret key for session management
 app.secret_key = os.urandom(24)
 
+# Set by web_ui_process(): lets manually triggered price runs notify like the
+# scheduled ones. Stays None when the UI is started standalone.
+_price_queue = None
+
 
 @app.context_processor
 def inject_version_info():
@@ -289,6 +293,28 @@ def update_query(query_id):
         flash("No query provided", "error")
 
     return redirect(url_for("queries"))
+
+
+@app.route("/update_prices/<int:query_id>", methods=["POST"])
+def update_prices_now(query_id):
+    """Run a price check for one query right away, ignoring its interval."""
+    import threading
+
+    if not db.get_query_active(query_id):
+        flash("Query is paused - resume it first", "warning")
+        return redirect(url_for("queries"))
+
+    # Scraping can take a while (deep runs walk several pages), so do it in the
+    # background and let the user keep using the UI.
+    threading.Thread(
+        target=core.collect_prices_for_query,
+        args=(query_id, _price_queue),
+        name=f"manual-price-{query_id}",
+        daemon=True,
+    ).start()
+
+    flash("Price update started - reload the price history in a moment", "success")
+    return redirect(request.referrer or url_for("queries"))
 
 
 @app.route("/toggle_query_active/<int:query_id>", methods=["POST"])
@@ -798,7 +824,15 @@ def api_logs():
     return jsonify({"logs": log_entries, "total": total_matching_entries})
 
 
-def web_ui_process():
+def web_ui_process(price_queue=None):
+    """
+    Args:
+        price_queue (Queue, optional): shared queue so a manually triggered
+            price update can still send Telegram notifications, just like the
+            scheduled runs do.
+    """
+    global _price_queue
+    _price_queue = price_queue
     logger.info("Web UI process started")
     try:
         app.run(host="0.0.0.0", port=8000, debug=False)
