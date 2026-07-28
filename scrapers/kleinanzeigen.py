@@ -145,14 +145,24 @@ class KleinanzeigenItem:
 
 def _fetch(url):
     """
-    Fetch a Kleinanzeigen page using the shared proxy pool with rotation.
+    Fetch a Kleinanzeigen page using the platform proxy pool with rotation.
+
+    If proxies are configured, a direct connection is never used as a fallback -
+    that would expose the server IP. Once every proxy has failed, the platform
+    pauses (see proxies.POOL_EXHAUSTED_COOLDOWN) and the list is re-checked
+    afterwards.
 
     Returns:
         str: The HTML body
 
     Raises:
+        proxies.NoProxyAvailable: pool configured but exhausted
         requests.HTTPError: If all attempts fail
     """
+    # Refuse early while the pool is in its cooldown
+    proxies.require_proxy("kleinanzeigen")
+    proxies_configured = proxies.has_proxies_configured("kleinanzeigen")
+
     timeout_str = db.get_parameter("request_timeout")
     timeout = int(timeout_str) if timeout_str else 10
 
@@ -172,6 +182,12 @@ def _fetch(url):
     last_error = None
     for attempt in range(1, MAX_PROXY_RETRIES + 1):
         proxy_configured, current_proxy = proxies.configure_proxy(session, "kleinanzeigen")
+        if current_proxy is None and proxies_configured:
+            # Pool ran dry mid-rotation: pause instead of going direct
+            proxies.mark_pool_exhausted("kleinanzeigen")
+            raise proxies.NoProxyAvailable(
+                "kleinanzeigen: no usable proxy left, pausing until the next re-check"
+            )
         logger.info(
             f"Fetching Kleinanzeigen page (attempt {attempt}/{MAX_PROXY_RETRIES}) | "
             f"Proxy: {current_proxy or 'None'}"
@@ -194,6 +210,12 @@ def _fetch(url):
             if current_proxy:
                 proxies.blacklist_proxy(current_proxy, "kleinanzeigen")
 
+    if proxies_configured:
+        # Every proxy we tried is now blacklisted - pause the platform
+        proxies.mark_pool_exhausted("kleinanzeigen")
+        raise proxies.NoProxyAvailable(
+            "kleinanzeigen: all proxies blocked, pausing until the next re-check"
+        )
     raise requests.HTTPError(
         f"Failed to fetch Kleinanzeigen page after {MAX_PROXY_RETRIES} attempts: {last_error}"
     )

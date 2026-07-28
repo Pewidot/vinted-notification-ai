@@ -599,6 +599,13 @@ def record_items_prices(query_id, items, price_queue=None, threshold=None,
         seen += 1
         if status == "new":
             new += 1
+        elif status in ("flapping", "currency_switch", "vat_switch"):
+            # Recorded in the history, but not a real move - stay silent.
+            # Seen on worldwide eBay listings that alternate between two values.
+            logger.debug(
+                f"[PRICES] {status} for item {item.id} "
+                f"({old_price} -> {new_price}) - no notification"
+            )
         elif status == "changed":
             changed += 1
             # Auction prices move with every bid - the history is still

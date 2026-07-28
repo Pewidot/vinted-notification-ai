@@ -31,6 +31,18 @@ _PROXY_CACHE_INITIALIZED = {}  # {platform: bool}
 _SINGLE_PROXY = {}             # {platform: proxy str or None}
 _PROXY_BLACKLIST = {}          # {platform: {proxy: expiration_time}}
 _PROXY_CACHE_TIME = {}         # {platform: epoch when this platform's cache was (re)initialized}
+_BLACKLIST_SYNCED = {}         # {platform: epoch when the blacklist was last read from the db}
+
+# How long a process may rely on its in-memory blacklist before re-reading the
+# shared one. Blacklisting happens in the scraper process, but the web UI can
+# start a price run too - without this sync it would hand out proxies the
+# scraper already knows to be dead.
+BLACKLIST_SYNC_INTERVAL = 60
+
+# When every proxy of a platform is dead, scraping pauses for this long instead
+# of falling back to a direct connection (which would expose the server IP and
+# usually gets blocked anyway). Afterwards the whole list is re-checked.
+POOL_EXHAUSTED_COOLDOWN = 60 * 60
 
 # Maximum number of concurrent workers for proxy checking
 MAX_PROXY_WORKERS = 90
@@ -196,6 +208,90 @@ def _load_blacklist_from_db(platform: str):
         logger.debug(f"[{platform}] Failed to load blacklist from database: {e}")
 
 
+def has_proxies_configured(platform: str) -> bool:
+    """True if a proxy list or list link is configured for this platform."""
+    import db
+
+    platform = _normalize_platform(platform)
+    for key in ("proxy_list", "proxy_list_link"):
+        if (db.get_parameter(_pkey(key, platform)) or "").strip():
+            return True
+    return False
+
+
+def mark_pool_exhausted(platform: str):
+    """
+    Remember that this platform currently has no usable proxy.
+
+    Stored in the database so every process observes the same pause.
+    """
+    import db
+
+    platform = _normalize_platform(platform)
+    if db.get_parameter(_pkey("proxy_exhausted_at", platform)):
+        return  # already paused - keep the original timestamp
+    db.set_parameter(_pkey("proxy_exhausted_at", platform), str(time.time()))
+    logger.error(
+        f"[{platform}] No usable proxy left - pausing this platform for "
+        f"{POOL_EXHAUSTED_COOLDOWN // 60} minutes, then re-checking every proxy"
+    )
+
+
+def pool_cooldown_remaining(platform: str) -> int:
+    """Seconds left before the platform's proxies are re-checked (0 = ready)."""
+    import db
+
+    platform = _normalize_platform(platform)
+    raw = db.get_parameter(_pkey("proxy_exhausted_at", platform))
+    if not raw:
+        return 0
+    try:
+        elapsed = time.time() - float(raw)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, int(POOL_EXHAUSTED_COOLDOWN - elapsed))
+
+
+def _maybe_recover_pool(platform: str):
+    """
+    When the cooldown has elapsed, wipe the blacklist and force a full
+    re-validation of the platform's proxy list, then let scraping resume.
+    """
+    import db
+
+    raw = db.get_parameter(_pkey("proxy_exhausted_at", platform))
+    if not raw:
+        return
+    if pool_cooldown_remaining(platform) > 0:
+        return
+
+    logger.info(f"[{platform}] Cooldown over - re-checking all proxies")
+    db.set_parameter(_pkey("proxy_exhausted_at", platform), "")
+    # Give every proxy a fresh chance and force a full re-fetch + re-validation
+    _get_blacklist(platform).clear()
+    _save_blacklist_to_db(platform)
+    _PROXY_CACHE_INITIALIZED[platform] = False
+    _PROXY_CACHE.pop(platform, None)
+    _SINGLE_PROXY.pop(platform, None)
+    db.set_parameter(_pkey("last_proxy_check_time", platform), "1")
+
+
+def _sync_blacklist(platform: str, max_age: int = BLACKLIST_SYNC_INTERVAL):
+    """
+    Refresh this process's blacklist from the shared one, at most once every
+    `max_age` seconds.
+
+    Needed because blacklisting is per-process in memory: the scraper process
+    marks a proxy dead, but a price run triggered from the web UI runs in a
+    different process and would otherwise keep using it.
+    """
+    now = time.time()
+    if now - _BLACKLIST_SYNCED.get(platform, 0) < max_age:
+        return
+    _BLACKLIST_SYNCED[platform] = now
+    _load_blacklist_from_db(platform)
+
+
 def _cleanup_expired_blacklist(platform: str):
     """
     Remove expired proxies from a platform's blacklist.
@@ -239,7 +335,18 @@ def get_random_proxy(platform: str = DEFAULT_PLATFORM, exclude_blacklisted: bool
 
     current_time = time.time()
 
-    # Clean up expired blacklisted proxies to prevent memory leak
+    # If the platform was paused because every proxy failed, either resume it
+    # (cooldown over -> full re-check) or stay paused without touching the network.
+    _maybe_recover_pool(platform)
+    remaining = pool_cooldown_remaining(platform)
+    if remaining > 0:
+        logger.debug(
+            f"[{platform}] Proxy pool exhausted, resuming in {remaining // 60} min"
+        )
+        return None
+
+    # Pick up proxies that other processes blacklisted, then drop expired ones
+    _sync_blacklist(platform)
     _cleanup_expired_blacklist(platform)
     blacklist = _get_blacklist(platform)
 
@@ -286,6 +393,7 @@ def get_random_proxy(platform: str = DEFAULT_PLATFORM, exclude_blacklisted: bool
             single = _SINGLE_PROXY[platform]
             if exclude_blacklisted and single in blacklist:
                 logger.warning(f"[{platform}] Single proxy is blacklisted: {single}")
+                mark_pool_exhausted(platform)
                 return None
             return single
 
@@ -299,6 +407,7 @@ def get_random_proxy(platform: str = DEFAULT_PLATFORM, exclude_blacklisted: bool
                 return selected
             else:
                 logger.warning(f"[{platform}] All {len(cache)} cached proxies are blacklisted")
+                mark_pool_exhausted(platform)
                 return None
         return None
 
@@ -387,9 +496,14 @@ def get_random_proxy(platform: str = DEFAULT_PLATFORM, exclude_blacklisted: bool
             logger.info(f"[{platform}] Selected proxy (unchecked): {selected} from {len(all_proxies)} proxies")
             return selected
 
-    # No working proxies found
-    logger.warning(f"[{platform}] No proxies configured or all proxies failed validation")
+    # No usable proxy. If the platform is *supposed* to use proxies, pause it
+    # instead of silently continuing without one.
     _PROXY_CACHE[platform] = None
+    if has_proxies_configured(platform):
+        logger.error(f"[{platform}] All configured proxies failed validation")
+        mark_pool_exhausted(platform)
+    else:
+        logger.warning(f"[{platform}] No proxies configured")
     return None
 
 
@@ -804,6 +918,33 @@ def configure_proxy(session: requests.Session, platform: str = DEFAULT_PLATFORM,
     session.proxies.update(proxy)
     logger.debug(f"[{platform}] Configured proxy: {proxy_str}")
     return True, proxy_str
+
+
+class NoProxyAvailable(RuntimeError):
+    """
+    Raised when a platform has proxies configured but none are usable.
+
+    Scrapers must not silently fall back to a direct connection in that case:
+    it exposes the server IP and is exactly what the proxy setup is meant to
+    avoid. Callers treat this like any other scrape error and move on.
+    """
+
+
+def require_proxy(platform: str):
+    """
+    Ensure scraping this platform is allowed right now.
+
+    Raises:
+        NoProxyAvailable: if proxies are configured but the pool is exhausted
+    """
+    platform = _normalize_platform(platform)
+    if not has_proxies_configured(platform):
+        return  # no proxies configured -> direct connection is intended
+    remaining = pool_cooldown_remaining(platform)
+    if remaining > 0:
+        raise NoProxyAvailable(
+            f"{platform}: proxy pool exhausted, retrying in {remaining // 60} min"
+        )
 
 
 def get_proxy_dict(platform: str = DEFAULT_PLATFORM, proxy: Optional[str] = None) -> tuple[Optional[dict], Optional[str]]:

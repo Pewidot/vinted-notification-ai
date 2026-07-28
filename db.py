@@ -530,6 +530,32 @@ def update_last_price_check(query_id, timestamp=None):
             conn.close()
 
 
+# eBay shows some (mostly commercial / cross-border) listings alternately with
+# and without VAT, so the same unchanged listing appears to jump by exactly the
+# VAT rate - e.g. 39.58 <-> 47.10, which is exactly x1.19. Matching the common
+# EU rates with a tight tolerance keeps genuine price moves detectable.
+VAT_MULTIPLIERS = (1.05, 1.07, 1.09, 1.10, 1.17, 1.19, 1.20, 1.21, 1.22,
+                   1.23, 1.24, 1.25, 1.27)
+VAT_TOLERANCE = 0.002  # 0.2% - tight enough not to swallow real price changes
+
+
+def looks_like_vat_switch(old_price, new_price):
+    """
+    True if the two prices differ by exactly a common VAT rate.
+
+    Used to tell "the same listing was shown net instead of gross" apart from a
+    real price change, which otherwise produces a notification on every run.
+    """
+    try:
+        old_v, new_v = float(old_price), float(new_price)
+    except (TypeError, ValueError):
+        return False
+    if old_v <= 0 or new_v <= 0:
+        return False
+    ratio = max(old_v, new_v) / min(old_v, new_v)
+    return any(abs(ratio - m) <= VAT_TOLERANCE for m in VAT_MULTIPLIERS)
+
+
 def record_price(item, query_id, price, currency="EUR", title=None, url=None,
                  photo_url=None, timestamp=None, is_auction=False, auction_end=0):
     """
@@ -541,7 +567,16 @@ def record_price(item, query_id, price, currency="EUR", title=None, url=None,
 
     Returns:
         tuple: (status, old_price, new_price)
-            status is "new", "changed" or "unchanged"
+            status is one of:
+              "new"             first time this listing is seen
+              "changed"         real price move - worth announcing
+              "flapping"        value bounced back to a recent one (recorded,
+                                but not announced)
+              "currency_switch" price arrived in a different currency, so the
+                                numbers are not comparable (ignored)
+              "vat_switch"      same listing shown net instead of gross (or vice
+                                versa) - differs by exactly a VAT rate (ignored)
+              "unchanged"       same price as before
     """
     import time as _time
 
@@ -552,7 +587,8 @@ def record_price(item, query_id, price, currency="EUR", title=None, url=None,
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT last_price, observations FROM tracked_items WHERE item=? AND query_id=?",
+            "SELECT last_price, observations, currency FROM tracked_items"
+            " WHERE item=? AND query_id=?",
             (item, query_id),
         )
         row = cursor.fetchone()
@@ -574,15 +610,70 @@ def record_price(item, query_id, price, currency="EUR", title=None, url=None,
             conn.commit()
             return "new", None, price
 
-        old_price = row[0]
+        old_price, _obs, old_currency = row[0], row[1], row[2]
+
+        # Cross-border listings are shown converted into the viewer's currency,
+        # and eBay serves the same listing sometimes in the seller's currency
+        # and sometimes converted. Comparing those numbers is meaningless, so
+        # the observation is ignored entirely: no history row (it would mix
+        # currencies in one series) and no change to last_price. Only the
+        # "seen" bookkeeping is updated below.
+        # Same reasoning for the net/gross flip: eBay shows some listings with
+        # VAT and some without, so an unchanged listing appears to jump by
+        # exactly the VAT rate (e.g. 39.58 <-> 47.10 = x1.19).
+        ignore_reason = None
+        if old_currency and currency and old_currency != currency:
+            ignore_reason = "currency_switch"
+        elif looks_like_vat_switch(old_price, price):
+            ignore_reason = "vat_switch"
+
+        if ignore_reason:
+            cursor.execute(
+                "UPDATE tracked_items SET last_seen=?, observations=observations+1,"
+                " title=COALESCE(?, title), url=COALESCE(?, url),"
+                " photo_url=COALESCE(?, photo_url)"
+                " WHERE item=? AND query_id=?",
+                (ts, title, url, photo_url, item, query_id),
+            )
+            conn.commit()
+            return ignore_reason, old_price, price
+
         changed = old_price is None or abs(float(old_price) - float(price)) > 0.001
 
+        status = "unchanged"
         if changed:
             cursor.execute(
                 "INSERT INTO price_history (item, query_id, price, currency, timestamp)"
                 " VALUES (?, ?, ?, ?, ?)",
                 (item, query_id, price, currency, ts),
             )
+            status = "changed"
+
+            # Two cases that look like a price change but are not, and would
+            # otherwise produce a message on every single run:
+            #
+            #  1) the currency switched (some listings are served in the
+            #     seller's currency one time and converted the next), so the
+            #     two numbers are not comparable at all
+            #  2) the value is bouncing back to one it already had moments ago
+            #     (seen on worldwide listings that alternate between a net and
+            #     a gross price)
+            #
+            # The observation is still recorded - only the notification is
+            # suppressed by reporting a distinct status.
+            if old_currency and currency and old_currency != currency:
+                status = "currency_switch"
+            else:
+                cursor.execute(
+                    "SELECT price FROM price_history WHERE item=? AND query_id=?"
+                    " ORDER BY timestamp DESC, id DESC LIMIT 4",
+                    (item, query_id),
+                )
+                recent = [r[0] for r in cursor.fetchall()]
+                # recent[0] is the row just inserted; anything further back that
+                # matches means the price is oscillating rather than moving.
+                if any(abs(float(p) - float(price)) < 0.001 for p in recent[2:]):
+                    status = "flapping"
         cursor.execute(
             "UPDATE tracked_items SET last_price=?, last_seen=?, observations=observations+1,"
             " title=COALESCE(?, title), url=COALESCE(?, url), photo_url=COALESCE(?, photo_url),"
@@ -592,7 +683,7 @@ def record_price(item, query_id, price, currency="EUR", title=None, url=None,
              auction_end or 0, auction_end or 0, item, query_id),
         )
         conn.commit()
-        return ("changed" if changed else "unchanged"), old_price, price
+        return status, old_price, price
     except Exception:
         print_exc()
         return "unchanged", None, price

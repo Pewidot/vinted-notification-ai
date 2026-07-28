@@ -80,6 +80,49 @@ def _parse_price(price_text):
         return 0.0, currency
 
 
+def _extract_image(card):
+    """
+    Pull the listing thumbnail out of a result card.
+
+    eBay lazy-loads images: in that variant `src` only holds a spacer served
+    from ebaystatic.com while the real URL sits in `data-defer-load`. Reading
+    `src` alone therefore yields no image at all for those cards, so every
+    known attribute is considered and placeholders are filtered out.
+
+    Returns:
+        str or None: the image URL, or None if the card only has placeholders
+    """
+    img = card.find("img")
+    if not img:
+        return None
+
+    candidates = [
+        img.get("src"),
+        img.get("data-defer-load"),
+        img.get("data-src"),
+        img.get("data-img-src"),
+    ]
+    # srcset holds "url size, url size, ..." - take the first URL
+    for attr in ("srcset", "data-srcset"):
+        value = img.get(attr)
+        if value:
+            candidates.append(value.split(",")[0].strip().split(" ")[0])
+
+    for url in candidates:
+        if not url:
+            continue
+        url = url.strip()
+        if url.startswith("//"):
+            url = "https:" + url
+        if not url.startswith("http"):
+            continue
+        # Spacer graphics and "no photo" stock images are not listing photos
+        if "ebaystatic.com" in url or "stockimage" in url.lower():
+            continue
+        return url
+    return None
+
+
 def _parse_time_left(text):
     """
     Turn an eBay remaining-time string into seconds.
@@ -180,12 +223,7 @@ class EbayWebItem:
         subtitle = subtitle_el.get_text(" ", strip=True) if subtitle_el else ""
         self.brand_title = re.sub(r"\s*\|\s*", " | ", subtitle) or "eBay"
 
-        self.photo = None
-        img = card.find("img")
-        if img:
-            src = img.get("src") or img.get("data-src") or ""
-            if src.startswith("http") and "ebaystatic" not in src:
-                self.photo = src
+        self.photo = _extract_image(card)
 
         # Listing date is one of the attribute rows (only present with _sop=10);
         # sponsored/ad cards have none and therefore never count as new
@@ -290,14 +328,19 @@ def _fetch_once(url, proxy_dict, timeout):
 def _fetch(url):
     """
     Fetch an eBay page with curl_cffi browser impersonation, routed through the
-    eBay proxy pool. Rotates through several proxies (blacklisting failures)
-    before falling back to a direct connection.
+    eBay proxy pool, rotating through several proxies and blacklisting failures.
+
+    If proxies are configured, a direct connection is never used as a fallback:
+    that would expose the server IP, which eBay blocks anyway. Once every proxy
+    has failed, the platform pauses (see proxies.POOL_EXHAUSTED_COOLDOWN) and
+    the whole list is re-checked afterwards.
 
     Returns:
         str: The HTML body
 
     Raises:
-        RuntimeError: If curl_cffi is missing or all attempts are blocked
+        proxies.NoProxyAvailable: pool configured but exhausted
+        RuntimeError: curl_cffi missing, or every attempt was blocked
     """
     try:
         import curl_cffi  # noqa: F401
@@ -306,20 +349,31 @@ def _fetch(url):
             "curl_cffi is required for eBay URL scraping (pip install curl_cffi)"
         ) from e
 
+    # Refuse early while the pool is in its cooldown
+    proxies.require_proxy("ebay")
+    proxies_configured = proxies.has_proxies_configured("ebay")
+
     timeout_str = db.get_parameter("request_timeout")
     timeout = int(timeout_str) if timeout_str else 10
     # Fail fast on slow/dead proxies during rotation
     timeout = min(timeout, EBAY_FETCH_TIMEOUT_CAP)
 
     # Try up to MAX_PROXY_ATTEMPTS different eBay proxies
-    tried_direct = False
     for attempt in range(1, MAX_PROXY_ATTEMPTS + 1):
         proxy_dict, current_proxy = proxies.get_proxy_dict("ebay")
-        if current_proxy:
-            logger.info(f"[ebay] fetching via proxy {current_proxy} (attempt {attempt}/{MAX_PROXY_ATTEMPTS})")
+
+        if current_proxy is None:
+            if proxies_configured:
+                # Pool ran dry mid-rotation: pause instead of going direct
+                proxies.mark_pool_exhausted("ebay")
+                raise proxies.NoProxyAvailable(
+                    "ebay: no usable proxy left, pausing until the next re-check"
+                )
+            logger.info(f"[ebay] no proxies configured, fetching directly "
+                        f"(attempt {attempt}/{MAX_PROXY_ATTEMPTS})")
         else:
-            logger.info(f"[ebay] no proxy available, fetching directly (attempt {attempt}/{MAX_PROXY_ATTEMPTS})")
-            tried_direct = True
+            logger.info(f"[ebay] fetching via proxy {current_proxy} "
+                        f"(attempt {attempt}/{MAX_PROXY_ATTEMPTS})")
 
         html = _fetch_once(url, proxy_dict, timeout)
         if html is not None:
@@ -328,17 +382,15 @@ def _fetch(url):
         if current_proxy:
             proxies.blacklist_proxy(current_proxy, "ebay")
         else:
-            # No proxy available and direct failed: no point retrying direct
-            break
+            break  # direct attempt failed and there is nothing to rotate to
 
-    # Last resort: try a direct connection if we haven't yet
-    if not tried_direct:
-        logger.info("[ebay] all proxies blocked, trying a direct connection")
-        html = _fetch_once(url, None, timeout)
-        if html is not None:
-            return html
-
-    raise RuntimeError("eBay blocked all impersonation profiles (proxies and direct)")
+    if proxies_configured:
+        # Every proxy we tried is now blacklisted - pause the platform
+        proxies.mark_pool_exhausted("ebay")
+        raise proxies.NoProxyAvailable(
+            "ebay: all proxies blocked, pausing until the next re-check"
+        )
+    raise RuntimeError("eBay blocked all impersonation profiles")
 
 
 def parse_html(html, base_netloc="www.ebay.de"):
