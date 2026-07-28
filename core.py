@@ -665,41 +665,78 @@ def record_items_prices(query_id, items, price_queue=None, threshold=None,
     return seen, new, changed, indexed
 
 
-# When this many listings move by the exact same percentage in one run, it is a
-# display-side change (eBay converting foreign-currency listings with a
-# different exchange rate), not a real price move.
-SYSTEMIC_CHANGE_MIN_ITEMS = 3
-SYSTEMIC_CHANGE_TOLERANCE = 1  # decimals used when grouping percentages
+# A display-side change (eBay adding the tax of whichever region the fetching
+# proxy sat in) moves several unrelated listings by the same factor at once.
+# Cent rounding makes those percentages differ slightly, so they are clustered
+# with a tolerance rather than compared exactly.
+SYSTEMIC_CLUSTER_TOLERANCE = 0.35   # percentage points
+SYSTEMIC_MIN_ITEMS = 3              # same move on this many listings = artefact
+SYSTEMIC_MIN_ITEMS_TAXLIKE = 2      # fewer suffice if the move matches a tax rate
+
+# Measured on live data: x1.19 German VAT, x1.081 Swiss VAT, x1.062 US sales
+# tax, x1.119 a 12% rate. Used only to corroborate a cluster - never on its own,
+# because e.g. x1.25 is also just a 20% discount.
+TAX_RATES = (2.6, 5.0, 6.25, 7.0, 7.7, 8.1, 9.0, 10.0, 12.0, 17.0, 19.0,
+             20.0, 21.0, 22.0, 23.0, 24.0, 25.0, 27.0)
+TAX_MATCH_TOLERANCE = 0.35  # percentage points
+
+
+def _looks_like_tax_rate(pct):
+    """True if a percentage move matches adding or removing a known tax rate."""
+    magnitude = abs(pct)
+    for rate in TAX_RATES:
+        # adding the tax (+19%) or removing it again (-15.97% for the same rate)
+        if abs(magnitude - rate) <= TAX_MATCH_TOLERANCE:
+            return True
+        removal = (1 - 1 / (1 + rate / 100)) * 100
+        if abs(magnitude - removal) <= TAX_MATCH_TOLERANCE:
+            return True
+    return False
 
 
 def _drop_systemic_changes(candidates):
     """
-    Filter out price changes that hit many unrelated listings identically.
+    Filter out price changes that hit several unrelated listings identically.
 
     Real prices are set per listing, so a skateboard, a CD and a figure lot do
-    not all drop by exactly 7.5% within the same minute - that only happens when
-    the whole page was rendered with a different conversion rate. Those batches
-    are recorded in the history but must not produce notifications.
+    not all move by the same percentage within the same minute - that happens
+    when the page was rendered with a different tax region or exchange rate.
+
+    Two listings are enough when the shared move also matches a known tax rate
+    (measured: +18.94% and +19.06% on two unrelated items - German VAT, the gap
+    caused purely by cent rounding). Without that corroboration three are
+    required, so a seller discounting two items by the same amount still gets
+    through.
     """
-    if len(candidates) < SYSTEMIC_CHANGE_MIN_ITEMS:
+    if len(candidates) < SYSTEMIC_MIN_ITEMS_TAXLIKE:
         return candidates
 
-    from collections import Counter
-
-    buckets = Counter(round(c["pct"], SYSTEMIC_CHANGE_TOLERANCE) for c in candidates)
-    kept = []
-    dropped = Counter()
-    for c in candidates:
-        bucket = round(c["pct"], SYSTEMIC_CHANGE_TOLERANCE)
-        if buckets[bucket] >= SYSTEMIC_CHANGE_MIN_ITEMS:
-            dropped[bucket] += 1
+    # Cluster by percentage, tolerating rounding differences
+    order = sorted(range(len(candidates)), key=lambda i: candidates[i]["pct"])
+    clusters, current = [], [order[0]]
+    for idx in order[1:]:
+        if candidates[idx]["pct"] - candidates[current[0]]["pct"] <= SYSTEMIC_CLUSTER_TOLERANCE:
+            current.append(idx)
         else:
-            kept.append(c)
+            clusters.append(current)
+            current = [idx]
+    clusters.append(current)
 
-    for bucket, count in dropped.items():
+    kept, suppressed = [], []
+    for cluster in clusters:
+        avg = sum(candidates[i]["pct"] for i in cluster) / len(cluster)
+        taxlike = _looks_like_tax_rate(avg)
+        needed = SYSTEMIC_MIN_ITEMS_TAXLIKE if taxlike else SYSTEMIC_MIN_ITEMS
+        if len(cluster) >= needed:
+            suppressed.append((avg, len(cluster), taxlike))
+        else:
+            kept.extend(candidates[i] for i in cluster)
+
+    for avg, count, taxlike in suppressed:
         logger.info(
-            f"[PRICES] Suppressed {count} notifications: {count} listings all moved "
-            f"by {bucket:+.1f}% at once - that is a conversion/display change, "
+            f"[PRICES] Suppressed {count} notifications: {count} listings moved by "
+            f"~{avg:+.1f}% at once"
+            f"{' (matches a tax rate)' if taxlike else ''} - display change, "
             f"not a real price move"
         )
     return kept
