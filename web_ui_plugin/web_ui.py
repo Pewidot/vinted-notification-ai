@@ -433,6 +433,16 @@ def update_config():
     telegram_enabled = "telegram_enabled" in request.form
     db.set_parameter("telegram_enabled", str(telegram_enabled))
 
+    # Price-change notifications per platform (tracking itself keeps running)
+    for platform in ("vinted", "kleinanzeigen", "ebay"):
+        db.set_parameter(
+            f"price_notify_{platform}",
+            str(f"price_notify_{platform}" in request.form),
+        )
+    db.set_parameter(
+        "price_notify_threshold", request.form.get("price_notify_threshold", "5")
+    )
+
     # Update RSS parameters
     rss_enabled = "rss_enabled" in request.form
     db.set_parameter("rss_enabled", str(rss_enabled))

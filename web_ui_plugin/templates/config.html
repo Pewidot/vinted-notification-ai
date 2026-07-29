@@ -147,6 +147,52 @@
                         <div class="col-md-12">
                             <div class="card h-100">
                                 <div class="card-header d-flex align-items-center">
+                                    <i class="bi bi-graph-down-arrow me-2 text-info"></i>
+                                    <h5 class="card-title mb-0">Price Notifications</h5>
+                                </div>
+                                <div class="card-body">
+                                    <p class="text-muted mb-3">
+                                        Price tracking and the history always keep running – these switches
+                                        only control whether a <b>price change</b> sends a Telegram message.
+                                        Auction-ending alerts are separate and stay on.
+                                    </p>
+                                    <div class="row">
+                                        <div class="col-md-8">
+                                            {% for plat, label, hint in [
+                                                ('vinted', 'Vinted', ''),
+                                                ('kleinanzeigen', 'Kleinanzeigen', ''),
+                                                ('ebay', 'eBay', 'eBay shows the same listing with the tax and rounding of whichever region the proxy sat in, so most changes are display artefacts')] %}
+                                            <div class="form-check form-switch mb-2">
+                                                <input class="form-check-input" type="checkbox"
+                                                       id="price_notify_{{ plat }}" name="price_notify_{{ plat }}"
+                                                       {% if params['price_notify_' + plat] == 'True' %}checked{% endif %}>
+                                                <label class="form-check-label" for="price_notify_{{ plat }}">
+                                                    {{ label }}
+                                                    {% if hint %}
+                                                    <small class="text-muted d-block">{{ hint }}</small>
+                                                    {% endif %}
+                                                </label>
+                                            </div>
+                                            {% endfor %}
+                                        </div>
+                                        <div class="col-md-4">
+                                            <label for="price_notify_threshold" class="form-label">
+                                                Minimum change (%)</label>
+                                            <input type="number" class="form-control" id="price_notify_threshold"
+                                                   name="price_notify_threshold" min="0" max="100" step="0.5"
+                                                   value="{{ params.price_notify_threshold or 5 }}">
+                                            <small class="form-text text-muted">Smaller moves are recorded but
+                                                not announced</small>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="row mb-4">
+                        <div class="col-md-12">
+                            <div class="card h-100">
+                                <div class="card-header d-flex align-items-center">
                                     <i class="bi bi-shield-lock me-2 text-info"></i>
                                     <h5 class="card-title mb-0">Proxy Settings</h5>
                                 </div>

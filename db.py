@@ -697,39 +697,33 @@ def record_price(item, query_id, price, currency="EUR", title=None, url=None,
 
         status = "unchanged"
         if changed:
+            # A listing served with different tax/conversion variants cycles
+            # through a small set of fixed values (measured: one listing rotated
+            # between 8.05, 8.47, 8.61, 10.07 and 10.09). Returning to a value
+            # this listing already had is therefore not news - it is the same
+            # offer rendered differently.
+            #
+            # Checking the FULL history matters: a window of the last few
+            # observations misses the repeat once more than two variants are in
+            # play. Repeats are neither announced nor appended to the history,
+            # which also keeps the chart free of the zig-zag.
             cursor.execute(
-                "INSERT INTO price_history (item, query_id, price, currency, timestamp)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (item, query_id, price, currency, ts),
+                "SELECT 1 FROM price_history"
+                " WHERE item=? AND query_id=? AND currency=? AND ABS(price - ?) < 0.001"
+                " LIMIT 1",
+                (item, query_id, currency, price),
             )
-            status = "changed"
+            seen_before = cursor.fetchone() is not None
 
-            # Two cases that look like a price change but are not, and would
-            # otherwise produce a message on every single run:
-            #
-            #  1) the currency switched (some listings are served in the
-            #     seller's currency one time and converted the next), so the
-            #     two numbers are not comparable at all
-            #  2) the value is bouncing back to one it already had moments ago
-            #     (seen on worldwide listings that alternate between a net and
-            #     a gross price)
-            #
-            # The observation is still recorded - only the notification is
-            # suppressed by reporting a distinct status.
-            if old_currency and currency and old_currency != currency:
-                status = "currency_switch"
+            if seen_before:
+                status = "flapping"
             else:
                 cursor.execute(
-                    "SELECT price FROM price_history"
-                    " WHERE item=? AND query_id=? AND currency=?"
-                    " ORDER BY timestamp DESC, id DESC LIMIT 4",
-                    (item, query_id, currency),
+                    "INSERT INTO price_history (item, query_id, price, currency, timestamp)"
+                    " VALUES (?, ?, ?, ?, ?)",
+                    (item, query_id, price, currency, ts),
                 )
-                recent = [r[0] for r in cursor.fetchall()]
-                # recent[0] is the row just inserted; anything further back that
-                # matches means the price is oscillating rather than moving.
-                if any(abs(float(p) - float(price)) < 0.001 for p in recent[2:]):
-                    status = "flapping"
+                status = "changed"
         cursor.execute(
             "UPDATE tracked_items SET last_price=?, last_seen=?, observations=observations+1,"
             " title=COALESCE(?, title), url=COALESCE(?, url), photo_url=COALESCE(?, photo_url),"

@@ -143,8 +143,11 @@ VALUES ('telegram_enabled', 'False'),
 
        ('price_scheduler_interval', '15'),
        ('price_notify_threshold', '5'),
+       ('price_notify_vinted', 'True'),
+       ('price_notify_kleinanzeigen', 'True'),
+       ('price_notify_ebay', 'False'),
 
-       ('version', '1.0.6.5'),
+       ('version', '1.0.6.6'),
        ('github_url', 'https://github.com/Fuyucch1/Vinted-Notifications'),
 
        ('items_per_query', '20'),

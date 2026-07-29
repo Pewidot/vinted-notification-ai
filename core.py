@@ -566,6 +566,23 @@ def get_price_threshold():
         return 5.0
 
 
+def price_notifications_enabled(platform):
+    """
+    Whether price-change messages are sent for a platform.
+
+    eBay ships with these off: it renders the same listing with the tax and
+    rounding of whichever region the fetching proxy sat in, so its price
+    "changes" are mostly display artefacts. Tracking and history keep running
+    either way - this only mutes the Telegram messages. Auction-ending alerts
+    are separate and stay on.
+    """
+    platform = (platform or "vinted").lower()
+    value = db.get_parameter(f"price_notify_{platform}")
+    if value is None:
+        return True  # unknown platform / parameter missing -> keep notifying
+    return str(value).lower() in ("true", "1", "yes")
+
+
 def record_items_prices(query_id, items, price_queue=None, threshold=None,
                         skip_index_ids=None):
     """
@@ -659,8 +676,17 @@ def record_items_prices(query_id, items, price_queue=None, threshold=None,
                         "pct": pct,
                     })
 
-    for event in _drop_systemic_changes(candidates):
-        price_queue.put(event)
+    if candidates:
+        # Platform-level mute is applied last: the history above is written
+        # either way, only the messages are held back.
+        if price_notifications_enabled(db.get_query_platform(query_id)):
+            for event in _drop_systemic_changes(candidates):
+                price_queue.put(event)
+        else:
+            logger.debug(
+                f"[PRICES] {len(candidates)} price change(s) recorded for query "
+                f"{query_id}, notifications muted for this platform"
+            )
 
     return seen, new, changed, indexed
 
