@@ -4,6 +4,7 @@ import sys
 import os
 import db
 import random
+import threading
 # Vinted now serves its API behind a Cloudflare bot challenge that fingerprints
 # the TLS/JA3 handshake. The plain `requests` library gets challenged (HTTP 200
 # with an HTML "Please wait" page instead of JSON), so we use curl_cffi which can
@@ -78,6 +79,15 @@ class Requester:
 
         self.session = requests.Session(impersonate=IMPERSONATE_BROWSER)
         self.session.headers.update(self.HEADER)
+
+        # This object is a process-wide singleton whose session, headers and
+        # proxies are mutated per request (set_locale, configure_proxy, and the
+        # session is even replaced on a 401/403). The scraper job and the price
+        # tracking job are separate scheduler jobs that can run at the same
+        # time, so without this lock two concurrent Vinted scrapes overwrite
+        # each other's locale/proxy mid-flight and requests fail.
+        # Re-entrant so callers may hold it across set_locale() + get().
+        self.lock = threading.RLock()
         self.debug = debug
 
         if self.debug:
@@ -132,7 +142,11 @@ class Requester:
         Raises:
             HTTPError: If the request fails after all retries
         """
+        # Serialise access: the session/headers/proxies below are shared state
+        with self.lock:
+            return self._get_locked(url, params)
 
+    def _get_locked(self, url, params=None):
         # Set a random proxy for this request
         proxy_configured, current_proxy = proxies.configure_proxy(self.session, "vinted")
         if proxy_configured:
@@ -268,6 +282,10 @@ class Requester:
         Raises:
             HTTPError: If the request fails
         """
+        with self.lock:
+            return self._post_locked(url, params)
+
+    def _post_locked(self, url, params=None):
         # Set a random proxy for this request
         proxy_configured, current_proxy = proxies.configure_proxy(self.session, "vinted")
         if proxy_configured:

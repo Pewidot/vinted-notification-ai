@@ -516,7 +516,10 @@ def process_items(queue, price_queue=None):
 
         delay = query[12] if len(query) > 12 and query[12] else default_delay
         last_scraped = query[13] if len(query) > 13 and query[13] else 0
-        if last_scraped and (now - float(last_scraped)) < int(delay):
+        # Tolerance because the scheduler does not fire at exact multiples: a
+        # tick arriving a fraction of a second early would otherwise mark the
+        # query "not due" and silently halve its effective frequency.
+        if last_scraped and (now - float(last_scraped)) < int(delay) - DUE_TOLERANCE:
             continue  # not due yet
 
         queries_by_platform[platform].append(query)
@@ -556,6 +559,12 @@ def scrape_page(platform, query, page, nbr_items):
 
         return ebay_web.search(query, nbr_items=nbr_items, page=page)
     return Vinted().items.search(query, nbr_items=nbr_items, page=page)
+
+
+# Slack when deciding whether a query is due. The scheduler fires on an
+# interval and can be a moment early; without this a query whose interval equals
+# the tick would be skipped every other round.
+DUE_TOLERANCE = 3  # seconds
 
 
 def get_price_threshold():

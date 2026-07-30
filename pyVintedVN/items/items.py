@@ -43,9 +43,8 @@ class Items:
         Raises:
             HTTPError: If the request to the Vinted API fails.
         """
-        # Extract the domain from the URL and set the locale
+        # Extract the domain from the URL
         locale = urlparse(url).netloc
-        requester.set_locale(locale)
 
         # Parse the URL to get the API parameters
         params = self.parse_url(url, nbr_items, page, time)
@@ -56,8 +55,13 @@ class Items:
         )
 
         try:
-            # Make the request to the Vinted API
-            response = requester.get(url=api_url, params=params)
+            # set_locale() and get() must not be split by another thread: the
+            # requester is a shared singleton, and a concurrent scrape would
+            # otherwise overwrite the locale between these two calls and send
+            # the request with the wrong Host header.
+            with requester.lock:
+                requester.set_locale(locale)
+                response = requester.get(url=api_url, params=params)
             response.raise_for_status()
 
             # Parse the response
