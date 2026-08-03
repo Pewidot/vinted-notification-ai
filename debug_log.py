@@ -17,6 +17,7 @@ Design notes:
   off again after 10 minutes - so the normal run carries no overhead.
 """
 
+import math
 import time
 
 RETENTION_SECONDS = 10 * 60      # entries older than this are dropped
@@ -61,15 +62,18 @@ def disable(query_id):
 
 
 def remaining(query_id):
-    """Seconds of recording left for a query (0 = off)."""
+    """Seconds of recording left for a query, rounded up (0 = off)."""
     if _enabled_until is None:
         return 0
     until = _enabled_until.get(int(query_id), 0)
-    return max(0, int(until - time.time()))
+    return max(0, math.ceil(until - time.time()))
 
 
 def is_enabled(query_id):
-    return remaining(query_id) > 0
+    """True while the recording window is still open."""
+    if _enabled_until is None:
+        return False
+    return _enabled_until.get(int(query_id), 0) > time.time()
 
 
 def log(query_id, event, message, **fields):
@@ -157,7 +161,7 @@ def active_queries():
     now = time.time()
     try:
         return {
-            int(q): int(u - now)
+            int(q): math.ceil(u - now)
             for q, u in dict(_enabled_until).items()
             if u > now
         }
