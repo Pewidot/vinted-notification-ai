@@ -1,6 +1,7 @@
 import multiprocessing
 import time
 import os
+import sys
 import db
 import debug_log
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -217,9 +218,21 @@ if __name__ == "__main__":
         )
         if migration_file:
             logger.info(f"Running migration: {migration_file}")
-            db.create_or_update_sqlite_db("./migrations/" + migration_file)
+            ok = db.create_or_update_sqlite_db("./migrations/" + migration_file)
             # Increment the version
-            current_version = db.get_parameter("version")
+            new_version = db.get_parameter("version")
+            # Stop on a migration that failed or left the version untouched -
+            # retrying it would spin here forever without making progress. The
+            # database is unchanged (the script runs in one transaction), so
+            # fixing the migration and restarting is safe.
+            if not ok or new_version == current_version:
+                logger.error(
+                    f"Migration {migration_file} did not complete (version is still "
+                    f"{current_version}). The database was left untouched. "
+                    f"See the traceback above."
+                )
+                sys.exit(1)
+            current_version = new_version
         else:
             break
 

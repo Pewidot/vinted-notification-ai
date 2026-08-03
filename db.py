@@ -11,6 +11,13 @@ def get_db_connection():
 
 
 def create_or_update_sqlite_db(db_path):
+    """
+    Run a SQL script against the database.
+
+    Returns True on success and False if the script failed - the caller must
+    check, because a migration that silently fails would otherwise be retried
+    forever without ever advancing the version.
+    """
     conn = None
     try:
         conn = get_db_connection()
@@ -21,8 +28,10 @@ def create_or_update_sqlite_db(db_path):
             cursor.executescript(sql_script)
 
         conn.commit()
+        return True
     except Exception:
         print_exc()
+        return False
     finally:
         if conn:
             conn.close()

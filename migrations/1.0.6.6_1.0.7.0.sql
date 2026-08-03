@@ -1,3 +1,10 @@
+-- `items` and `query_telegram_bots` carry foreign keys onto `queries`, so
+-- SQLite refuses to drop `queries` while key enforcement is on. This is the
+-- table rebuild procedure from the SQLite docs: keys off, rebuild in one
+-- transaction, keys on again. The pragma must sit outside the transaction,
+-- where it is a no-op.
+PRAGMA foreign_keys=OFF;
+
 BEGIN TRANSACTION;
 
 -- Remove price tracking completely.
@@ -53,3 +60,5 @@ SET value = '1.0.7.0'
 WHERE key = 'version';
 
 COMMIT;
+
+PRAGMA foreign_keys=ON;

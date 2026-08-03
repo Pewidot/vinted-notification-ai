@@ -518,6 +518,10 @@ def process_items(queue):
         active = query[7] if len(query) > 7 and query[7] is not None else 1
         if not active:
             logger.debug(f"[{platform.upper()}] Skipping paused query {query[0]}")
+            debug_log.log(
+                query[0], "wait",
+                "Query is paused - it is not scraped until you resume it",
+            )
             continue
 
         delay = query[8] if len(query) > 8 and query[8] else default_delay
