@@ -79,17 +79,8 @@ def update_last_timestamp(query_id, timestamp):
 
 
 def add_item_to_db(id, title, query_id, price, timestamp, photo_url, currency="EUR",
-                   url=None, update_last_item=True):
-    """
-    Store a found listing.
-
-    Args:
-        update_last_item (bool): Whether to advance the query's `last_item`
-            watermark. Price runs walk *older* result pages, so they must index
-            what they find without moving the watermark - otherwise genuinely
-            new listings between the watermark and that old item would be
-            skipped and never announced.
-    """
+                   url=None):
+    """Store a found listing and advance the query's watermark."""
     conn = None
     try:
         conn = get_db_connection()
@@ -100,10 +91,9 @@ def add_item_to_db(id, title, query_id, price, timestamp, photo_url, currency="E
             (id, title, price, currency, timestamp, photo_url, query_id, url),
         )
         # Update the last item for the query
-        if update_last_item:
-            cursor.execute(
-                "UPDATE queries SET last_item=? WHERE id=?", (timestamp, query_id)
-            )
+        cursor.execute(
+            "UPDATE queries SET last_item=? WHERE id=?", (timestamp, query_id)
+        )
         conn.commit()
     except Exception:
         print_exc()
@@ -119,8 +109,7 @@ def get_queries():
         cursor = conn.cursor()
         cursor.execute(
             "SELECT id, query, last_item, query_name, telegram_chat_id, telegram_enabled, "
-            "platform, active, track_prices, price_interval, price_depth, last_price_check, "
-            "refresh_delay, last_scraped "
+            "platform, active, refresh_delay, last_scraped "
             "FROM queries"
         )
         return cursor.fetchall()
@@ -198,10 +187,6 @@ def remove_query_from_db(query_number):
         cursor.execute("DELETE FROM items WHERE query_id=?", (query_number,))
         # Delete telegram bot links for this query
         cursor.execute("DELETE FROM query_telegram_bots WHERE query_id=?", (query_number,))
-        cursor.execute("DELETE FROM query_price_bots WHERE query_id=?", (query_number,))
-        # Delete price tracking data for this query
-        cursor.execute("DELETE FROM price_history WHERE query_id=?", (query_number,))
-        cursor.execute("DELETE FROM tracked_items WHERE query_id=?", (query_number,))
         # Delete the query
         cursor.execute("DELETE FROM queries WHERE id=?", (query_number,))
         conn.commit()
@@ -221,10 +206,6 @@ def remove_all_queries_from_db():
         cursor.execute("DELETE FROM items")
         # Delete all telegram bot links
         cursor.execute("DELETE FROM query_telegram_bots")
-        cursor.execute("DELETE FROM query_price_bots")
-        # Delete all price tracking data
-        cursor.execute("DELETE FROM price_history")
-        cursor.execute("DELETE FROM tracked_items")
         # Then delete all queries
         cursor.execute("DELETE FROM queries")
         conn.commit()
@@ -441,7 +422,7 @@ def set_query_telegram_enabled(query_id, enabled):
             conn.close()
 
 
-### PRICE TRACKING ###
+### QUERY SCHEDULING ###
 
 
 def set_query_refresh_delay(query_id, seconds):
@@ -523,454 +504,6 @@ def get_scraper_tick_seconds(floor=10):
     finally:
         if conn:
             conn.close()
-
-
-def set_query_price_tracking(query_id, enabled, interval=None, depth=None):
-    """
-    Configure price tracking for a query.
-
-    Args:
-        query_id (int): The query id
-        enabled (bool): Whether to track prices at all
-        interval (int, optional): Minutes between price runs
-        depth (int, optional): How many result pages to walk per run
-    """
-    conn = None
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        fields = ["track_prices=?"]
-        values = [1 if enabled else 0]
-        if interval is not None:
-            fields.append("price_interval=?")
-            values.append(max(1, int(interval)))
-        if depth is not None:
-            fields.append("price_depth=?")
-            values.append(max(1, int(depth)))
-        values.append(query_id)
-        cursor.execute(f"UPDATE queries SET {', '.join(fields)} WHERE id=?", values)
-        conn.commit()
-        return True
-    except Exception:
-        print_exc()
-        return False
-    finally:
-        if conn:
-            conn.close()
-
-
-def get_queries_due_for_price_check(now=None):
-    """
-    Queries whose price run is due: tracking on, query active, and the
-    configured interval has elapsed since the last run.
-
-    Returns:
-        list of tuples: (id, query, platform, price_depth, price_interval)
-    """
-    import time as _time
-
-    now = now if now is not None else _time.time()
-    conn = None
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT id, query, platform, price_depth, price_interval "
-            "FROM queries "
-            "WHERE track_prices=1 AND COALESCE(active,1)=1 "
-            "AND (COALESCE(last_price_check,0) + price_interval*60) <= ?",
-            (now,),
-        )
-        return cursor.fetchall()
-    except Exception:
-        print_exc()
-        return []
-    finally:
-        if conn:
-            conn.close()
-
-
-def update_last_price_check(query_id, timestamp=None):
-    """Mark a query's price run as done."""
-    import time as _time
-
-    conn = None
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE queries SET last_price_check=? WHERE id=?",
-            (timestamp if timestamp is not None else _time.time(), query_id),
-        )
-        conn.commit()
-        return True
-    except Exception:
-        print_exc()
-        return False
-    finally:
-        if conn:
-            conn.close()
-
-
-"""
-Note on tax-driven phantom price changes
-----------------------------------------
-eBay adds the tax of the region it thinks the viewer is in, so the same listing
-shows different amounts depending on which proxy fetched the page (measured:
-x1.081 = Swiss VAT 8.1%, x1.062 = US sales tax 6.25%, x1.119 = 12%).
-
-Matching those ratios directly was tried and rejected: a x1.25 ratio is also a
-plain -20% discount and x1.19 a -16% one, so the rule swallowed real price
-drops. The artefact is instead caught by two far more specific signals:
-
-  * flapping           - the price returns to a value it just had (see below)
-  * systemic changes   - many unrelated listings move by the exact same
-                         percentage in one run (see core._drop_systemic_changes)
-"""
-
-
-def record_price(item, query_id, price, currency="EUR", title=None, url=None,
-                 photo_url=None, timestamp=None, is_auction=False, auction_end=0):
-    """
-    Record one price observation for a listing.
-
-    A history row is only written when the price actually changed (or on first
-    sight) - re-reading an unchanged listing every few hours would otherwise
-    bloat the table without adding information. `last_seen` is always refreshed.
-
-    Returns:
-        tuple: (status, old_price, new_price)
-            status is one of:
-              "new"             first time this listing is seen
-              "changed"         real price move - worth announcing
-              "flapping"        value bounced back to a recent one (recorded,
-                                but not announced)
-              "currency_switch" price arrived in a different currency, so the
-                                numbers are not comparable (ignored)
-              "unchanged"       same price as before
-    """
-    import time as _time
-
-    ts = timestamp if timestamp is not None else _time.time()
-    item = str(item)
-    conn = None
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        # Each currency is its own series: the same listing shown in GBP and in
-        # converted EUR must not be compared, or every exchange-rate move would
-        # look like a price change.
-        currency = (currency or "EUR").upper()
-        cursor.execute(
-            "SELECT last_price, observations, currency FROM tracked_items"
-            " WHERE item=? AND query_id=? AND currency=?",
-            (item, query_id, currency),
-        )
-        row = cursor.fetchone()
-
-        if row is None:
-            cursor.execute(
-                "INSERT INTO tracked_items (item, query_id, title, url, photo_url, currency,"
-                " first_price, last_price, first_seen, last_seen, observations,"
-                " is_auction, auction_end)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
-                (item, query_id, title, url, photo_url, currency, price, price, ts, ts,
-                 1 if is_auction else 0, auction_end or 0),
-            )
-            cursor.execute(
-                "INSERT INTO price_history (item, query_id, price, currency, timestamp)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (item, query_id, price, currency, ts),
-            )
-            conn.commit()
-            return "new", None, price
-
-        old_price, _obs, old_currency = row[0], row[1], row[2]
-
-        # Cross-border listings are shown converted into the viewer's currency,
-        # and eBay serves the same listing sometimes in the seller's currency
-        # and sometimes converted. Comparing those numbers is meaningless, so
-        # the observation is ignored entirely: no history row (it would mix
-        # currencies in one series) and no change to last_price. Only the
-        # "seen" bookkeeping is updated below.
-        changed = old_price is None or abs(float(old_price) - float(price)) > 0.001
-
-        status = "unchanged"
-        if changed:
-            # A listing served with different tax/conversion variants cycles
-            # through a small set of fixed values (measured: one listing rotated
-            # between 8.05, 8.47, 8.61, 10.07 and 10.09). Returning to a value
-            # this listing already had is therefore not news - it is the same
-            # offer rendered differently.
-            #
-            # Checking the FULL history matters: a window of the last few
-            # observations misses the repeat once more than two variants are in
-            # play. Repeats are neither announced nor appended to the history,
-            # which also keeps the chart free of the zig-zag.
-            cursor.execute(
-                "SELECT 1 FROM price_history"
-                " WHERE item=? AND query_id=? AND currency=? AND ABS(price - ?) < 0.001"
-                " LIMIT 1",
-                (item, query_id, currency, price),
-            )
-            seen_before = cursor.fetchone() is not None
-
-            if seen_before:
-                status = "flapping"
-            else:
-                cursor.execute(
-                    "INSERT INTO price_history (item, query_id, price, currency, timestamp)"
-                    " VALUES (?, ?, ?, ?, ?)",
-                    (item, query_id, price, currency, ts),
-                )
-                status = "changed"
-        cursor.execute(
-            "UPDATE tracked_items SET last_price=?, last_seen=?, observations=observations+1,"
-            " title=COALESCE(?, title), url=COALESCE(?, url), photo_url=COALESCE(?, photo_url),"
-            " is_auction=?, auction_end=CASE WHEN ?>0 THEN ? ELSE auction_end END"
-            " WHERE item=? AND query_id=? AND currency=?",
-            (price, ts, title, url, photo_url, 1 if is_auction else 0,
-             auction_end or 0, auction_end or 0, item, query_id, currency),
-        )
-        conn.commit()
-        return status, old_price, price
-    except Exception:
-        print_exc()
-        return "unchanged", None, price
-    finally:
-        if conn:
-            conn.close()
-
-
-def get_auctions_ending_soon(within_seconds=600, now=None):
-    """
-    Auctions that end within the given window and have not been announced yet.
-
-    Only rows that are still in the future are returned, so a run that was down
-    for a while does not spam alerts for auctions that already closed.
-
-    Returns:
-        list of tuples: (item, query_id, title, url, photo_url, last_price,
-                         currency, auction_end)
-    """
-    import time as _time
-
-    now = now if now is not None else _time.time()
-    conn = None
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute(
-            # One alert per listing even if it is tracked in several currencies
-            "SELECT item, query_id, title, url, photo_url, last_price, currency,"
-            " MAX(auction_end) FROM tracked_items"
-            " WHERE is_auction=1 AND COALESCE(ending_notified,0)=0"
-            " AND auction_end > ? AND auction_end <= ?"
-            " GROUP BY item, query_id",
-            (now, now + within_seconds),
-        )
-        return cursor.fetchall()
-    except Exception:
-        print_exc()
-        return []
-    finally:
-        if conn:
-            conn.close()
-
-
-def mark_auction_notified(item, query_id):
-    """Remember that the ending alert for this auction was sent (one-time)."""
-    conn = None
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE tracked_items SET ending_notified=1 WHERE item=? AND query_id=?",
-            (str(item), query_id),
-        )
-        conn.commit()
-        return True
-    except Exception:
-        print_exc()
-        return False
-    finally:
-        if conn:
-            conn.close()
-
-
-def get_price_history(item, query_id=None, limit=500, currency=None):
-    """
-    Recorded prices for a listing, oldest first.
-
-    Pass `currency` to get one clean series: a listing offered in several
-    currencies has an independent history per currency, and mixing them would
-    show exchange-rate moves as price changes.
-    """
-    conn = None
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        sql = "SELECT price, currency, timestamp FROM price_history WHERE item=?"
-        params = [str(item)]
-        if query_id is not None:
-            sql += " AND query_id=?"
-            params.append(query_id)
-        if currency:
-            sql += " AND currency=?"
-            params.append(currency.upper())
-        sql += " ORDER BY timestamp LIMIT ?"
-        params.append(limit)
-        cursor.execute(sql, params)
-        return cursor.fetchall()
-    except Exception:
-        print_exc()
-        return []
-    finally:
-        if conn:
-            conn.close()
-
-
-def get_tracked_items(query_id=None, limit=200, changed_only=False):
-    """
-    Listings under price tracking, most recently seen first.
-
-    Returns tuples:
-        (item, query_id, title, url, photo_url, currency, first_price,
-         last_price, first_seen, last_seen, observations, query_name, platform)
-    """
-    conn = None
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        sql = (
-            "SELECT t.item, t.query_id, t.title, t.url, t.photo_url, t.currency,"
-            " t.first_price, t.last_price, t.first_seen, t.last_seen, t.observations,"
-            " q.query_name, q.platform"
-            " FROM tracked_items t LEFT JOIN queries q ON q.id = t.query_id"
-        )
-        conds, params = [], []
-        if query_id is not None:
-            conds.append("t.query_id=?")
-            params.append(query_id)
-        if changed_only:
-            conds.append("t.first_price <> t.last_price")
-        if conds:
-            sql += " WHERE " + " AND ".join(conds)
-        sql += " ORDER BY t.last_seen DESC LIMIT ?"
-        params.append(limit)
-        cursor.execute(sql, params)
-        return cursor.fetchall()
-    except Exception:
-        print_exc()
-        return []
-    finally:
-        if conn:
-            conn.close()
-
-
-def get_price_stats():
-    """Summary numbers for the price dashboard."""
-    conn = None
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        stats = {}
-        cursor.execute("SELECT COUNT(*) FROM tracked_items")
-        stats["tracked_items"] = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM price_history")
-        stats["observations"] = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM tracked_items WHERE first_price <> last_price")
-        stats["changed"] = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM tracked_items WHERE last_price < first_price")
-        stats["dropped"] = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM queries WHERE track_prices=1")
-        stats["tracked_queries"] = cursor.fetchone()[0]
-        return stats
-    except Exception:
-        print_exc()
-        return {"tracked_items": 0, "observations": 0, "changed": 0,
-                "dropped": 0, "tracked_queries": 0}
-    finally:
-        if conn:
-            conn.close()
-
-
-def get_query_price_bots(query_id):
-    """Bots explicitly selected for PRICE messages of a query."""
-    conn = None
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT b.id, b.name, b.token, b.chat_id, b.enabled"
-            " FROM telegram_bots b JOIN query_price_bots qb ON b.id = qb.bot_id"
-            " WHERE qb.query_id=? ORDER BY b.id",
-            (query_id,),
-        )
-        return cursor.fetchall()
-    except Exception:
-        print_exc()
-        return []
-    finally:
-        if conn:
-            conn.close()
-
-
-def set_query_price_bots(query_id, bot_ids):
-    """Replace the bots that receive price messages for a query."""
-    conn = None
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM query_price_bots WHERE query_id=?", (query_id,))
-        for bot_id in bot_ids or []:
-            cursor.execute(
-                "INSERT OR IGNORE INTO query_price_bots (query_id, bot_id) VALUES (?, ?)",
-                (query_id, bot_id),
-            )
-        conn.commit()
-        return True
-    except Exception:
-        print_exc()
-        return False
-    finally:
-        if conn:
-            conn.close()
-
-
-def get_query_price_targets(query_id):
-    """
-    Where price messages for this query should go.
-
-    Falls back to the query's normal notification bots when no dedicated price
-    bot is selected, so enabling tracking works without extra configuration.
-
-    Returns:
-        list of tuples: (id, name, token, chat_id)
-    """
-    conn = None
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT b.id, b.name, b.token, b.chat_id"
-            " FROM telegram_bots b JOIN query_price_bots qb ON b.id = qb.bot_id"
-            " WHERE qb.query_id=? AND b.enabled=1"
-            " AND b.token IS NOT NULL AND b.token <> ''"
-            " AND b.chat_id IS NOT NULL AND b.chat_id <> '' ORDER BY b.id",
-            (query_id,),
-        )
-        targets = cursor.fetchall()
-        if targets:
-            return targets
-    except Exception:
-        print_exc()
-    finally:
-        if conn:
-            conn.close()
-    # No dedicated price bots -> use the query's regular notification targets
-    _, targets = get_query_telegram_targets(query_id)
-    return targets
 
 
 ### TELEGRAM BOTS ###
@@ -1103,7 +636,6 @@ def delete_telegram_bot(bot_id):
         was_command = bool(row[0]) if row else False
 
         cursor.execute("DELETE FROM query_telegram_bots WHERE bot_id=?", (bot_id,))
-        cursor.execute("DELETE FROM query_price_bots WHERE bot_id=?", (bot_id,))
         cursor.execute("DELETE FROM telegram_bots WHERE id=?", (bot_id,))
 
         # Promote another bot to command bot if we removed the command bot

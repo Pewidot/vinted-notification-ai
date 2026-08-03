@@ -1,6 +1,7 @@
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify
 import db
 import core
+import debug_log
 import proxies
 import os
 import re
@@ -22,10 +23,6 @@ app = Flask(
 
 # Secret key for session management
 app.secret_key = os.urandom(24)
-
-# Set by web_ui_process(): lets manually triggered price runs notify like the
-# scheduled ones. Stays None when the UI is started standalone.
-_price_queue = None
 
 
 @app.context_processor
@@ -181,7 +178,6 @@ def queries():
             last_found_item = "Never"
 
         linked_bots = db.get_query_bots(query[0])
-        price_bots = db.get_query_price_bots(query[0])
         formatted_queries.append(
             {
                 "id": i + 1,
@@ -194,11 +190,8 @@ def queries():
                 "active": (True if len(query) <= 7 or query[7] is None else bool(query[7])),
                 "bot_ids": [b[0] for b in linked_bots],
                 "bot_names": [b[1] for b in linked_bots],
-                "track_prices": bool(query[8]) if len(query) > 8 and query[8] else False,
-                "price_interval": (query[9] if len(query) > 9 and query[9] else 360),
-                "price_depth": (query[10] if len(query) > 10 and query[10] else 1),
-                "price_bot_ids": [b[0] for b in price_bots],
-                "refresh_delay": (query[12] if len(query) > 12 and query[12] else None),
+                "refresh_delay": (query[8] if len(query) > 8 and query[8] else None),
+                "debug_seconds_left": debug_log.remaining(query[0]),
             }
         )
 
@@ -219,10 +212,6 @@ def add_query():
     if platform not in ("vinted", "kleinanzeigen", "ebay"):
         platform = "vinted"
     bot_ids = [int(b) for b in request.form.getlist("bot_ids") if b.isdigit()]
-    price_bot_ids = [int(b) for b in request.form.getlist("price_bot_ids") if b.isdigit()]
-    track_prices = "track_prices" in request.form
-    price_interval = request.form.get("price_interval", 360, type=int) or 360
-    price_depth = request.form.get("price_depth", 1, type=int) or 1
     refresh_delay = request.form.get("refresh_delay", type=int)
     if query:
         message, is_new_query = core.process_query(
@@ -230,10 +219,6 @@ def add_query():
             name=query_name if query_name != "" else None,
             platform=platform,
             bot_ids=bot_ids,
-            track_prices=track_prices,
-            price_interval=price_interval,
-            price_depth=price_depth,
-            price_bot_ids=price_bot_ids,
             refresh_delay=refresh_delay,
         )
         if is_new_query:
@@ -273,10 +258,6 @@ def update_query(query_id):
     query = request.form.get("query")
     query_name = request.form.get("query_name", "").strip()
     bot_ids = [int(b) for b in request.form.getlist("bot_ids") if b.isdigit()]
-    price_bot_ids = [int(b) for b in request.form.getlist("price_bot_ids") if b.isdigit()]
-    track_prices = "track_prices" in request.form
-    price_interval = request.form.get("price_interval", 360, type=int) or 360
-    price_depth = request.form.get("price_depth", 1, type=int) or 1
     refresh_delay = request.form.get("refresh_delay", type=int)
 
     if query:
@@ -285,10 +266,6 @@ def update_query(query_id):
             query,
             name=query_name if query_name != "" else None,
             bot_ids=bot_ids,
-            track_prices=track_prices,
-            price_interval=price_interval,
-            price_depth=price_depth,
-            price_bot_ids=price_bot_ids,
             refresh_delay=refresh_delay,
         )
         if success:
@@ -299,28 +276,6 @@ def update_query(query_id):
         flash("No query provided", "error")
 
     return redirect(url_for("queries"))
-
-
-@app.route("/update_prices/<int:query_id>", methods=["POST"])
-def update_prices_now(query_id):
-    """Run a price check for one query right away, ignoring its interval."""
-    import threading
-
-    if not db.get_query_active(query_id):
-        flash("Query is paused - resume it first", "warning")
-        return redirect(url_for("queries"))
-
-    # Scraping can take a while (deep runs walk several pages), so do it in the
-    # background and let the user keep using the UI.
-    threading.Thread(
-        target=core.collect_prices_for_query,
-        args=(query_id, _price_queue),
-        name=f"manual-price-{query_id}",
-        daemon=True,
-    ).start()
-
-    flash("Price update started - reload the price history in a moment", "success")
-    return redirect(request.referrer or url_for("queries"))
 
 
 @app.route("/toggle_query_active/<int:query_id>", methods=["POST"])
@@ -433,16 +388,6 @@ def update_config():
     telegram_enabled = "telegram_enabled" in request.form
     db.set_parameter("telegram_enabled", str(telegram_enabled))
 
-    # Price-change notifications per platform (tracking itself keeps running)
-    for platform in ("vinted", "kleinanzeigen", "ebay"):
-        db.set_parameter(
-            f"price_notify_{platform}",
-            str(f"price_notify_{platform}" in request.form),
-        )
-    db.set_parameter(
-        "price_notify_threshold", request.form.get("price_notify_threshold", "5")
-    )
-
     # Update RSS parameters
     rss_enabled = "rss_enabled" in request.form
     db.set_parameter("rss_enabled", str(rss_enabled))
@@ -510,73 +455,44 @@ def reset_proxies():
     return redirect(url_for("config"))
 
 
-@app.route("/prices")
-def prices():
-    query_id = request.args.get("query", type=int)
-    changed_only = request.args.get("changed") == "1"
-    limit = request.args.get("limit", 100, type=int)
-
-    rows = db.get_tracked_items(query_id=query_id, limit=limit, changed_only=changed_only)
-    items = []
-    for r in rows:
-        (item, qid, title, url, photo_url, currency, first_price,
-         last_price, first_seen, last_seen, observations, query_name, platform) = r
-        try:
-            change_pct = ((last_price - first_price) / first_price * 100) if first_price else 0
-        except (TypeError, ZeroDivisionError):
-            change_pct = 0
-        # Per-currency series: mixing currencies would render exchange-rate
-        # moves as price swings
-        history = db.get_price_history(item, qid, currency=currency)
-        items.append({
-            "item": item,
-            "query_id": qid,
-            "title": title or "(no title)",
-            "url": url,
-            "photo_url": photo_url,
-            "currency": currency or "EUR",
-            "first_price": first_price,
-            "last_price": last_price,
-            "change_pct": change_pct,
-            "observations": observations,
-            "query_name": query_name or f"Query {qid}",
-            "platform": platform or "vinted",
-            "last_seen": datetime.fromtimestamp(last_seen).strftime("%Y-%m-%d %H:%M")
-            if last_seen else "-",
-            "spark": [float(h[0]) for h in history],
-        })
-
-    # Queries that have tracking switched on, for the filter dropdown
-    tracked_queries = []
-    for q in db.get_queries():
-        if len(q) > 8 and q[8]:
-            parsed = parse_qs(urlparse(q[1]).query)
-            name = q[3] or parsed.get("search_text", [None])[0] or parsed.get("_nkw", [None])[0] or q[1]
-            tracked_queries.append({"id": q[0], "name": name, "platform": q[6] or "vinted"})
-
+@app.route("/query_log/<int:query_id>")
+def query_log(query_id):
+    """Per-query debug log: what was requested, returned and filtered out."""
+    search = request.args.get("q", "").strip()
+    debug_log.prune()
+    entries = [
+        {
+            "time": datetime.fromtimestamp(e["ts"]).strftime("%H:%M:%S"),
+            "event": e.get("event", ""),
+            "message": e.get("message", ""),
+            "details": e.get("details", {}),
+        }
+        for e in debug_log.entries(query_id=query_id, search=search or None)
+    ]
     return render_template(
-        "prices.html",
-        items=items,
-        stats=db.get_price_stats(),
-        tracked_queries=tracked_queries,
-        selected_query=query_id,
-        changed_only=changed_only,
+        "query_log.html",
+        query_id=query_id,
+        query_name=db.get_query_name(query_id),
+        entries=entries,
+        search=search,
+        seconds_left=debug_log.remaining(query_id),
+        retention_minutes=debug_log.RETENTION_SECONDS // 60,
     )
 
 
-@app.route("/price_history/<item>")
-def price_history(item):
-    """Full price history of one listing (used by the detail view)."""
-    query_id = request.args.get("query", type=int)
-    history = db.get_price_history(item, query_id)
-    return jsonify({
-        "item": item,
-        "points": [
-            {"price": float(p), "currency": c,
-             "timestamp": t, "date": datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M")}
-            for p, c, t in history
-        ],
-    })
+@app.route("/toggle_query_log/<int:query_id>", methods=["POST"])
+def toggle_query_log(query_id):
+    """Start or stop the 10-minute debug recording for a query."""
+    if debug_log.is_enabled(query_id):
+        debug_log.disable(query_id)
+        flash("Debug logging stopped", "success")
+    else:
+        debug_log.enable(query_id)
+        flash(
+            f"Debug logging started for {debug_log.DEFAULT_DURATION // 60} minutes",
+            "success",
+        )
+    return redirect(request.referrer or url_for("query_log", query_id=query_id))
 
 
 @app.route("/telegram_bots")
@@ -842,15 +758,8 @@ def api_logs():
     return jsonify({"logs": log_entries, "total": total_matching_entries})
 
 
-def web_ui_process(price_queue=None):
-    """
-    Args:
-        price_queue (Queue, optional): shared queue so a manually triggered
-            price update can still send Telegram notifications, just like the
-            scheduled runs do.
-    """
-    global _price_queue
-    _price_queue = price_queue
+def web_ui_process(debug_shared=None):
+    debug_log.init(debug_shared)
     logger.info("Web UI process started")
     try:
         app.run(host="0.0.0.0", port=8000, debug=False)

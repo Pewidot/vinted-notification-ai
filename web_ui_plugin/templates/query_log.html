@@ -1,0 +1,136 @@
+{% extends "base.html" %}
+
+{% block title %}Debug Log - Multisite Track{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
+    <h1 class="h2">Debug Log</h1>
+    <a href="/queries" class="btn btn-sm btn-outline-secondary">↩ Back to queries</a>
+</div>
+
+<div class="card mb-3">
+    <div class="card-body">
+        <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
+            <div>
+                <div class="fw-bold">{{ query_name or 'Query ' ~ query_id }}</div>
+                {% if seconds_left > 0 %}
+                <span class="badge bg-success">
+                    <i class="bi bi-record-circle"></i> Recording –
+                    {{ (seconds_left // 60) }}:{{ '%02d'|format(seconds_left % 60) }} left
+                </span>
+                {% else %}
+                <span class="badge bg-secondary">Not recording</span>
+                {% endif %}
+                <small class="text-muted ms-2">
+                    Kept in memory only, entries older than {{ retention_minutes }} minutes disappear
+                </small>
+            </div>
+            <form action="/toggle_query_log/{{ query_id }}" method="post">
+                {% if seconds_left > 0 %}
+                <button type="submit" class="btn btn-outline-warning btn-sm">
+                    <i class="bi bi-stop-circle"></i> Stop recording
+                </button>
+                {% else %}
+                <button type="submit" class="btn btn-outline-success btn-sm">
+                    <i class="bi bi-record-circle"></i> Start recording
+                </button>
+                {% endif %}
+            </form>
+        </div>
+
+        <form method="get" class="row g-2">
+            <div class="col-md-9">
+                <input type="text" class="form-control" name="q" value="{{ search }}"
+                       placeholder="Search – item id, title, event, URL, price …">
+            </div>
+            <div class="col-md-3 d-flex gap-2">
+                <button type="submit" class="btn btn-primary flex-grow-1">Search</button>
+                {% if search %}
+                <a href="/query_log/{{ query_id }}" class="btn btn-outline-secondary">Clear</a>
+                {% endif %}
+            </div>
+        </form>
+        {% if search %}
+        <small class="text-muted">Filtered by “{{ search }}” – {{ entries|length }} entries</small>
+        {% endif %}
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <div>
+            <i class="bi bi-journal-text me-2 text-info"></i>
+            <span class="fw-bold">{{ entries|length }} entries</span>
+            <small class="text-muted ms-2">newest first</small>
+        </div>
+        <a href="{{ request.full_path }}" class="btn btn-sm btn-outline-secondary">
+            <i class="bi bi-arrow-clockwise"></i> Refresh
+        </a>
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-sm table-hover mb-0 align-middle">
+                <thead>
+                <tr>
+                    <th style="width: 90px;">Time</th>
+                    <th style="width: 110px;">Event</th>
+                    <th>What happened</th>
+                    <th>Details</th>
+                </tr>
+                </thead>
+                <tbody>
+                {% for e in entries %}
+                <tr>
+                    <td class="text-muted small font-monospace">{{ e.time }}</td>
+                    <td>
+                        {% if e.event == 'notify' %}
+                        <span class="badge bg-success">announced</span>
+                        {% elif e.event == 'skip' %}
+                        <span class="badge bg-warning text-dark">filtered</span>
+                        {% elif e.event == 'request' %}
+                        <span class="badge bg-primary">request</span>
+                        {% elif e.event == 'result' %}
+                        <span class="badge bg-info text-dark">result</span>
+                        {% elif e.event == 'listing' %}
+                        <span class="badge bg-light text-dark border">listing</span>
+                        {% elif e.event == 'listing-old' %}
+                        <span class="badge bg-light text-muted border">old listing</span>
+                        {% elif e.event == 'error' %}
+                        <span class="badge bg-danger">error</span>
+                        {% elif e.event == 'wait' %}
+                        <span class="badge bg-secondary">waiting</span>
+                        {% else %}
+                        <span class="badge bg-secondary">{{ e.event }}</span>
+                        {% endif %}
+                    </td>
+                    <td class="small">{{ e.message }}</td>
+                    <td class="small text-muted">
+                        {% for k, v in e.details.items() %}
+                        {% if v %}
+                        <span class="me-2"><span class="text-secondary">{{ k }}:</span>
+                            {% if k == 'url' %}<a href="{{ v }}" target="_blank">open</a>
+                            {% else %}{{ v }}{% endif %}
+                        </span>
+                        {% endif %}
+                        {% endfor %}
+                    </td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="4" class="text-center text-muted py-4">
+                        {% if search %}
+                        Nothing matches “{{ search }}”.
+                        {% elif seconds_left > 0 %}
+                        Recording – entries appear with the next scrape of this query.
+                        {% else %}
+                        No entries. Press <b>Start recording</b> and wait for the next scrape.
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}

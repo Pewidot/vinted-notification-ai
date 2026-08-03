@@ -1,4 +1,5 @@
 import db
+import debug_log
 import requests
 from pyVintedVN import Vinted, requester
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
@@ -6,6 +7,18 @@ from logger import get_logger
 
 # Get logger for this module
 logger = get_logger(__name__)
+
+
+def _fmt_ts(ts):
+    """Epoch -> readable time for the debug log (empty when unknown)."""
+    if not ts:
+        return ""
+    from datetime import datetime
+
+    try:
+        return datetime.fromtimestamp(float(ts)).strftime("%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError, OSError):
+        return str(ts)
 
 
 def normalize_query_for_platform(query, platform):
@@ -63,21 +76,19 @@ def normalize_query_for_platform(query, platform):
     return None, None  # vinted is normalized by the caller (process_query/process_update_query)
 
 
-def _apply_price_settings(query_id, track_prices, price_interval, price_depth, price_bot_ids,
-                          refresh_delay=None):
+# Slack when deciding whether a query is due. The scheduler fires on an
+# interval and can be a moment early; without this a query whose interval
+# equals the tick would be skipped every other round.
+DUE_TOLERANCE = 3  # seconds
+
+
+def _apply_query_settings(query_id, refresh_delay=None):
     """Persist the per-query options shared by add and update."""
-    if track_prices is not None:
-        db.set_query_price_tracking(
-            query_id, track_prices, interval=price_interval, depth=price_depth
-        )
-    if price_bot_ids is not None:
-        db.set_query_price_bots(query_id, price_bot_ids)
     if refresh_delay is not None:
         db.set_query_refresh_delay(query_id, refresh_delay)
 
 
 def process_query(query, name=None, telegram_chat_id=None, platform="vinted", bot_ids=None,
-                  track_prices=None, price_interval=None, price_depth=None, price_bot_ids=None,
                   refresh_delay=None):
     """
     Process a query for the given platform and add it to the database.
@@ -117,8 +128,7 @@ def process_query(query, name=None, telegram_chat_id=None, platform="vinted", bo
         if new_id is not None:
             if bot_ids is not None:
                 db.set_query_bots(new_id, bot_ids)
-            _apply_price_settings(new_id, track_prices, price_interval, price_depth,
-                                  price_bot_ids, refresh_delay)
+            _apply_query_settings(new_id, refresh_delay)
         return "Query added.", True
 
     # Check if the URL is a brand URL (format: url/brand/id-name)
@@ -177,8 +187,7 @@ def process_query(query, name=None, telegram_chat_id=None, platform="vinted", bo
         if new_id is not None:
             if bot_ids is not None:
                 db.set_query_bots(new_id, bot_ids)
-            _apply_price_settings(new_id, track_prices, price_interval, price_depth,
-                                  price_bot_ids, refresh_delay)
+            _apply_query_settings(new_id, refresh_delay)
         return "Query added.", True
 
 
@@ -243,8 +252,7 @@ def process_remove_query(number):
 
 
 def process_update_query(query_id, query, name, telegram_chat_id=None, bot_ids=None,
-                         track_prices=None, price_interval=None, price_depth=None,
-                         price_bot_ids=None, refresh_delay=None):
+                         refresh_delay=None):
     """
     Process the update of a query in the database.
 
@@ -270,8 +278,7 @@ def process_update_query(query_id, query, name, telegram_chat_id=None, bot_ids=N
         if db.update_query_in_db(query_id, processed_query, name, telegram_chat_id):
             if bot_ids is not None:
                 db.set_query_bots(query_id, bot_ids)
-            _apply_price_settings(query_id, track_prices, price_interval, price_depth,
-                              price_bot_ids, refresh_delay)
+            _apply_query_settings(query_id, refresh_delay)
             return "Query updated.", True
         return "Failed to update query.", False
 
@@ -304,8 +311,7 @@ def process_update_query(query_id, query, name, telegram_chat_id=None, bot_ids=N
     if db.update_query_in_db(query_id, processed_query, name, telegram_chat_id):
         if bot_ids is not None:
             db.set_query_bots(query_id, bot_ids)
-        _apply_price_settings(query_id, track_prices, price_interval, price_depth,
-                              price_bot_ids, refresh_delay)
+        _apply_query_settings(query_id, refresh_delay)
         return "Query updated.", True
     else:
         return "Failed to update query.", False
@@ -399,7 +405,7 @@ def get_user_country(profile_id):
     return user_country
 
 
-def _scrape_platform_queries(platform, queries, items_per_query, queue, price_queue=None):
+def _scrape_platform_queries(platform, queries, items_per_query, queue):
     """
     Scrape all queries of a single platform sequentially and put results on the
     queue. Runs in its own thread so the three platforms scrape in parallel.
@@ -413,11 +419,9 @@ def _scrape_platform_queries(platform, queries, items_per_query, queue, price_qu
         queries (list): Query rows for this platform
         items_per_query (int): Number of items to request per query
         queue (Queue): Queue to put (data, query_id) results on
-        price_queue (Queue, optional): queue for price-change notifications
     """
     # Create a Vinted instance only for the vinted worker (uses singleton requester)
     vinted = Vinted() if platform == "vinted" else None
-    threshold = get_price_threshold()
 
     for query in queries:
         # Stamp before scraping: a query that keeps failing must not be retried
@@ -425,6 +429,8 @@ def _scrape_platform_queries(platform, queries, items_per_query, queue, price_qu
         db.mark_query_scraped(query[0])
         try:
             logger.info(f"[{platform.upper()}] Scraping query {query[0]}: {query[1]}")
+            debug_log.log(query[0], "request", f"Requesting {platform}",
+                          url=query[1], items_per_query=items_per_query)
 
             # Search for items on the query's platform
             if platform == "kleinanzeigen":
@@ -445,32 +451,32 @@ def _scrape_platform_queries(platform, queries, items_per_query, queue, price_qu
                 f"[{platform.upper()}] Found {len(data)} new item(s) "
                 f"(of {len(all_items)} scraped) for query {query[0]}"
             )
-            queue.put((data, query[0]))
-
-            # This page was fetched anyway - if the query tracks prices, feed
-            # everything on it into the history instead of re-requesting it
-            # later. Costs no extra request.
-            if len(query) > 8 and query[8] and all_items:
-                # The items in `data` are on their way to the notification
-                # pipeline, which indexes them itself - indexing them here first
-                # would make that pipeline skip them as "already seen".
-                s, n, c, i = record_items_prices(
-                    query[0], all_items, price_queue, threshold,
-                    skip_index_ids={str(it.id) for it in data},
+            debug_log.log(query[0], "result",
+                          f"{len(all_items)} listing(s) returned, {len(data)} count as new",
+                          returned=len(all_items), new=len(data))
+            # Record every listing the page returned, so a missing one can be
+            # traced to "never came back" vs "came back but was filtered"
+            for it in all_items:
+                debug_log.log(
+                    query[0],
+                    "listing" if it.is_new_item() else "listing-old",
+                    ("new" if it.is_new_item() else "older than the new-item window")
+                    + f": {getattr(it, 'title', '')[:70]}",
+                    item=it.id,
+                    price=getattr(it, "price", ""),
+                    published=_fmt_ts(getattr(it, "raw_timestamp", 0)),
+                    url=getattr(it, "url", ""),
                 )
-                if c or i:
-                    logger.info(
-                        f"[{platform.upper()}] Price tracking (from regular scrape) "
-                        f"query {query[0]}: {c} change(s), {i} newly indexed"
-                    )
+            queue.put((data, query[0]))
 
         except Exception as e:
             logger.error(f"[{platform.upper()}] Error processing query {query[0]}: {e}")
+            debug_log.log(query[0], "error", f"Scrape failed: {str(e)[:200]}")
             # Put empty result on error
             queue.put(([], query[0]))
 
 
-def process_items(queue, price_queue=None):
+def process_items(queue):
     """
     Scrape all active queries and put their results on the queue.
 
@@ -514,12 +520,16 @@ def process_items(queue, price_queue=None):
             logger.debug(f"[{platform.upper()}] Skipping paused query {query[0]}")
             continue
 
-        delay = query[12] if len(query) > 12 and query[12] else default_delay
-        last_scraped = query[13] if len(query) > 13 and query[13] else 0
+        delay = query[8] if len(query) > 8 and query[8] else default_delay
+        last_scraped = query[9] if len(query) > 9 and query[9] else 0
         # Tolerance because the scheduler does not fire at exact multiples: a
         # tick arriving a fraction of a second early would otherwise mark the
         # query "not due" and silently halve its effective frequency.
         if last_scraped and (now - float(last_scraped)) < int(delay) - DUE_TOLERANCE:
+            debug_log.log(
+                query[0], "wait",
+                f"Not due yet ({int(now - float(last_scraped))}s of {int(delay)}s elapsed)",
+            )
             continue  # not due yet
 
         queries_by_platform[platform].append(query)
@@ -531,7 +541,7 @@ def process_items(queue, price_queue=None):
     threads = [
         threading.Thread(
             target=_scrape_platform_queries,
-            args=(platform, queries, items_per_query, queue, price_queue),
+            args=(platform, queries, items_per_query, queue),
             name=f"scraper-{platform}",
             daemon=True,
         )
@@ -541,353 +551,6 @@ def process_items(queue, price_queue=None):
         t.start()
     for t in threads:
         t.join()
-
-
-def scrape_page(platform, query, page, nbr_items):
-    """
-    Fetch one result page for a query on its platform.
-
-    Returns:
-        list: platform item objects (empty on error)
-    """
-    if platform == "kleinanzeigen":
-        from scrapers import kleinanzeigen
-
-        return kleinanzeigen.search(query, nbr_items=nbr_items, page=page)
-    if platform == "ebay":
-        from scrapers import ebay_web
-
-        return ebay_web.search(query, nbr_items=nbr_items, page=page)
-    return Vinted().items.search(query, nbr_items=nbr_items, page=page)
-
-
-# Slack when deciding whether a query is due. The scheduler fires on an
-# interval and can be a moment early; without this a query whose interval equals
-# the tick would be skipped every other round.
-DUE_TOLERANCE = 3  # seconds
-
-
-def get_price_threshold():
-    """Minimum percentage move before a price change is worth announcing."""
-    try:
-        return float(db.get_parameter("price_notify_threshold") or 5)
-    except (TypeError, ValueError):
-        return 5.0
-
-
-def price_notifications_enabled(platform):
-    """
-    Whether price-change messages are sent for a platform.
-
-    eBay ships with these off: it renders the same listing with the tax and
-    rounding of whichever region the fetching proxy sat in, so its price
-    "changes" are mostly display artefacts. Tracking and history keep running
-    either way - this only mutes the Telegram messages. Auction-ending alerts
-    are separate and stay on.
-    """
-    platform = (platform or "vinted").lower()
-    value = db.get_parameter(f"price_notify_{platform}")
-    if value is None:
-        return True  # unknown platform / parameter missing -> keep notifying
-    return str(value).lower() in ("true", "1", "yes")
-
-
-def record_items_prices(query_id, items, price_queue=None, threshold=None,
-                        skip_index_ids=None):
-    """
-    Record prices for a batch of already-scraped listings.
-
-    Shared by the deep price runs and the normal scrape: whatever the regular
-    scraper fetched is free data, so it is fed into the price history too
-    instead of being re-requested later.
-
-    Listings that are not in the database yet are indexed with their real
-    publish time and WITHOUT advancing the query watermark, so this never fires
-    a "new listing" notification and never hides genuinely new listings.
-
-    Args:
-        skip_index_ids (set, optional): ids that must NOT be indexed here
-            because the notification pipeline is about to handle them. Without
-            this, indexing a brand-new listing would make clear_item_queue treat
-            it as already known and silently drop its notification.
-
-    Returns:
-        tuple: (seen, new, changed, indexed)
-    """
-    if threshold is None:
-        threshold = get_price_threshold()
-    skip_index_ids = skip_index_ids or set()
-    seen = new = changed = indexed = 0
-    # Notifications are collected first: a systemic display change (see below)
-    # can only be recognised by looking at the whole batch.
-    candidates = []
-
-    for item in items:
-        price = getattr(item, "price", None)
-        if price is None:
-            continue
-
-        if str(item.id) not in skip_index_ids and not db.is_item_in_db_by_id(item.id):
-            db.add_item_to_db(
-                id=item.id,
-                title=getattr(item, "title", None),
-                query_id=query_id,
-                price=float(price),
-                timestamp=getattr(item, "raw_timestamp", 0) or 0,
-                photo_url=getattr(item, "photo", None),
-                currency=getattr(item, "currency", "EUR"),
-                url=getattr(item, "url", None),
-                update_last_item=False,
-            )
-            indexed += 1
-
-        is_auction = bool(getattr(item, "is_auction", False))
-        status, old_price, new_price = db.record_price(
-            item=item.id,
-            query_id=query_id,
-            price=float(price),
-            currency=getattr(item, "currency", "EUR"),
-            title=getattr(item, "title", None),
-            url=getattr(item, "url", None),
-            photo_url=getattr(item, "photo", None),
-            is_auction=is_auction,
-            auction_end=getattr(item, "auction_end", 0),
-        )
-        seen += 1
-        if status == "new":
-            new += 1
-        elif status in ("flapping", "currency_switch"):
-            # Recorded in the history, but not a real move - stay silent.
-            # Seen on worldwide eBay listings that alternate between two values.
-            logger.debug(
-                f"[PRICES] {status} for item {item.id} "
-                f"({old_price} -> {new_price}) - no notification"
-            )
-        elif status == "changed":
-            changed += 1
-            # Auction prices move with every bid - the history is still
-            # recorded, but announcing each bid would be noise. Auctions get a
-            # single alert shortly before they end instead.
-            if is_auction:
-                continue
-            if price_queue is not None and old_price:
-                pct = (float(new_price) - float(old_price)) / float(old_price) * 100
-                if abs(pct) >= threshold:
-                    candidates.append({
-                        "type": "price_change",
-                        "query_id": query_id,
-                        "title": getattr(item, "title", "") or "",
-                        "url": getattr(item, "url", "") or "",
-                        "photo": getattr(item, "photo", None),
-                        "old_price": float(old_price),
-                        "new_price": float(new_price),
-                        "currency": getattr(item, "currency", "EUR"),
-                        "pct": pct,
-                    })
-
-    if candidates:
-        # Platform-level mute is applied last: the history above is written
-        # either way, only the messages are held back.
-        if price_notifications_enabled(db.get_query_platform(query_id)):
-            for event in _drop_systemic_changes(candidates):
-                price_queue.put(event)
-        else:
-            logger.debug(
-                f"[PRICES] {len(candidates)} price change(s) recorded for query "
-                f"{query_id}, notifications muted for this platform"
-            )
-
-    return seen, new, changed, indexed
-
-
-# A display-side change (eBay adding the tax of whichever region the fetching
-# proxy sat in) moves several unrelated listings by the same factor at once.
-# Cent rounding makes those percentages differ slightly, so they are clustered
-# with a tolerance rather than compared exactly.
-SYSTEMIC_CLUSTER_TOLERANCE = 0.35   # percentage points
-SYSTEMIC_MIN_ITEMS = 3              # same move on this many listings = artefact
-SYSTEMIC_MIN_ITEMS_TAXLIKE = 2      # fewer suffice if the move matches a tax rate
-
-# Measured on live data: x1.19 German VAT, x1.081 Swiss VAT, x1.062 US sales
-# tax, x1.119 a 12% rate. Used only to corroborate a cluster - never on its own,
-# because e.g. x1.25 is also just a 20% discount.
-TAX_RATES = (2.6, 5.0, 6.25, 7.0, 7.7, 8.1, 9.0, 10.0, 12.0, 17.0, 19.0,
-             20.0, 21.0, 22.0, 23.0, 24.0, 25.0, 27.0)
-TAX_MATCH_TOLERANCE = 0.35  # percentage points
-
-
-def _looks_like_tax_rate(pct):
-    """True if a percentage move matches adding or removing a known tax rate."""
-    magnitude = abs(pct)
-    for rate in TAX_RATES:
-        # adding the tax (+19%) or removing it again (-15.97% for the same rate)
-        if abs(magnitude - rate) <= TAX_MATCH_TOLERANCE:
-            return True
-        removal = (1 - 1 / (1 + rate / 100)) * 100
-        if abs(magnitude - removal) <= TAX_MATCH_TOLERANCE:
-            return True
-    return False
-
-
-def _drop_systemic_changes(candidates):
-    """
-    Filter out price changes that hit several unrelated listings identically.
-
-    Real prices are set per listing, so a skateboard, a CD and a figure lot do
-    not all move by the same percentage within the same minute - that happens
-    when the page was rendered with a different tax region or exchange rate.
-
-    Two listings are enough when the shared move also matches a known tax rate
-    (measured: +18.94% and +19.06% on two unrelated items - German VAT, the gap
-    caused purely by cent rounding). Without that corroboration three are
-    required, so a seller discounting two items by the same amount still gets
-    through.
-    """
-    if len(candidates) < SYSTEMIC_MIN_ITEMS_TAXLIKE:
-        return candidates
-
-    # Cluster by percentage, tolerating rounding differences
-    order = sorted(range(len(candidates)), key=lambda i: candidates[i]["pct"])
-    clusters, current = [], [order[0]]
-    for idx in order[1:]:
-        if candidates[idx]["pct"] - candidates[current[0]]["pct"] <= SYSTEMIC_CLUSTER_TOLERANCE:
-            current.append(idx)
-        else:
-            clusters.append(current)
-            current = [idx]
-    clusters.append(current)
-
-    kept, suppressed = [], []
-    for cluster in clusters:
-        avg = sum(candidates[i]["pct"] for i in cluster) / len(cluster)
-        taxlike = _looks_like_tax_rate(avg)
-        needed = SYSTEMIC_MIN_ITEMS_TAXLIKE if taxlike else SYSTEMIC_MIN_ITEMS
-        if len(cluster) >= needed:
-            suppressed.append((avg, len(cluster), taxlike))
-        else:
-            kept.extend(candidates[i] for i in cluster)
-
-    for avg, count, taxlike in suppressed:
-        logger.info(
-            f"[PRICES] Suppressed {count} notifications: {count} listings moved by "
-            f"~{avg:+.1f}% at once"
-            f"{' (matches a tax rate)' if taxlike else ''} - display change, "
-            f"not a real price move"
-        )
-    return kept
-
-
-def run_price_check(query_id, query, platform, depth, price_queue=None,
-                    items_per_query=None, threshold=None):
-    """
-    Walk `depth` result pages for one query and record every price found.
-
-    Page 1 only ever shows the newest listings; the older ones - and their price
-    changes - live further back, which is why depth matters here.
-    """
-    import time as _time
-
-    platform = (platform or "vinted").lower()
-    depth = max(1, int(depth or 1))
-    if items_per_query is None:
-        items_per_query = int(db.get_parameter("items_per_query") or 20)
-    if threshold is None:
-        threshold = get_price_threshold()
-
-    seen = new = changed = indexed = 0
-    try:
-        for page in range(1, depth + 1):
-            try:
-                items = scrape_page(platform, query, page, items_per_query)
-            except Exception as e:
-                logger.warning(
-                    f"[PRICES] {platform} query {query_id} page {page} failed: {str(e)[:120]}"
-                )
-                break
-            if not items:
-                break  # no more results - stop paging
-
-            s, n, c, i = record_items_prices(query_id, items, price_queue, threshold)
-            seen += s
-            new += n
-            changed += c
-            indexed += i
-
-            # Be gentle between pages - deep runs otherwise look like a burst
-            if page < depth:
-                _time.sleep(2)
-    finally:
-        # Always advance the timer, even after an error, so one broken query
-        # cannot monopolise every following run.
-        db.update_last_price_check(query_id)
-
-    logger.info(
-        f"[PRICES] query {query_id} ({platform}): {seen} listings checked, "
-        f"{new} newly tracked, {indexed} indexed into items, {changed} price change(s)"
-    )
-    return {"seen": seen, "new": new, "changed": changed, "indexed": indexed}
-
-
-def collect_prices(price_queue=None):
-    """
-    Scheduler entry point: run a price check for every query that is due.
-
-    Args:
-        price_queue (Queue, optional): queue for price-change notifications
-    """
-    due = db.get_queries_due_for_price_check()
-    if due:
-        items_per_query = int(db.get_parameter("items_per_query") or 20)
-        threshold = get_price_threshold()
-        logger.info(f"[PRICES] {len(due)} query/queries due for a price check")
-        for query_id, query, platform, depth, interval in due:
-            run_price_check(query_id, query, platform, depth, price_queue,
-                            items_per_query, threshold)
-
-    # After the runs: announce auctions about to close (once each)
-    notify_ending_auctions(price_queue)
-
-
-def collect_prices_for_query(query_id, price_queue=None):
-    """
-    Run a price check for a single query right now, ignoring its interval.
-    Used by the "update prices now" button in the web UI.
-    """
-    for q in db.get_queries():
-        if q[0] == query_id:
-            result = run_price_check(
-                query_id, q[1], q[6] if len(q) > 6 else "vinted",
-                q[10] if len(q) > 10 else 1, price_queue,
-            )
-            notify_ending_auctions(price_queue)
-            return result
-    return None
-
-
-def notify_ending_auctions(price_queue=None, within_minutes=10):
-    """
-    Send a one-time alert for auctions ending within the next `within_minutes`.
-
-    Auctions are deliberately excluded from per-change price messages (every bid
-    would trigger one); this is the single moment where an alert is useful.
-    """
-    if price_queue is None:
-        return
-    ending = db.get_auctions_ending_soon(within_seconds=within_minutes * 60)
-    for item, query_id, title, url, photo_url, last_price, currency, auction_end in ending:
-        price_queue.put({
-            "type": "auction_ending",
-            "query_id": query_id,
-            "title": title or "",
-            "url": url or "",
-            "photo": photo_url,
-            "price": float(last_price or 0),
-            "currency": currency or "EUR",
-            "ends_at": auction_end,
-        })
-        db.mark_auction_notified(item, query_id)
-    if ending:
-        logger.info(f"[PRICES] {len(ending)} auction(s) ending soon announced")
 
 
 def clear_item_queue(items_queue, new_items_queue):
@@ -906,12 +569,21 @@ def clear_item_queue(items_queue, new_items_queue):
                 last_query_timestamp is not None
                 and last_query_timestamp >= item.raw_timestamp
             ):
-                pass
+                debug_log.log(
+                    query_id, "skip",
+                    "Not newer than the last announced listing",
+                    item=item.id, title=(getattr(item, "title", "") or "")[:70],
+                    published=_fmt_ts(item.raw_timestamp),
+                    watermark=_fmt_ts(last_query_timestamp),
+                )
             # In case of multiple queries, we need to check if the item is already in the db
             elif db.is_item_in_db_by_id(item.id) is True:
                 # We update the timestamp
                 db.update_last_timestamp(query_id, item.raw_timestamp)
-                pass
+                debug_log.log(
+                    query_id, "skip", "Already known (announced before)",
+                    item=item.id, title=(getattr(item, "title", "") or "")[:70],
+                )
             # If there's an allowlist and
             # If the user's country is not in the allowlist, we just update the timestamp
             # (country lookup only exists for Vinted items)
@@ -919,12 +591,20 @@ def clear_item_queue(items_queue, new_items_queue):
                 get_user_country(item.raw_data["user"]["id"])
             ) not in (db.get_allowlist() + ["XX"]):
                 db.update_last_timestamp(query_id, item.raw_timestamp)
-                pass
+                debug_log.log(
+                    query_id, "skip", "Seller country not in the allowlist",
+                    item=item.id, title=(getattr(item, "title", "") or "")[:70],
+                    allowlist=db.get_allowlist(),
+                )
             # Check if the item title contains any banwords
             elif banwords_str and contains_banwords(item.title, banwords_str):
                 # If it contains banwords, just update the timestamp and skip
                 db.update_last_timestamp(query_id, item.raw_timestamp)
-                pass
+                debug_log.log(
+                    query_id, "skip", "Title contains a banword",
+                    item=item.id, title=(getattr(item, "title", "") or "")[:70],
+                    banwords=banwords_str,
+                )
             else:
                 # We create the message
                 message_template = db.get_parameter("message_template")
@@ -968,6 +648,13 @@ def clear_item_queue(items_queue, new_items_queue):
 
                 # add the item to the queue (query_id lets the telegram bot pick the right chat,
                 # item.photo lets it attach the image as a real photo)
+                debug_log.log(
+                    query_id, "notify", "Announced as a new listing",
+                    item=item.id, title=(getattr(item, "title", "") or "")[:70],
+                    price=f"{getattr(item, 'price', '')} {getattr(item, 'currency', '')}".strip(),
+                    published=_fmt_ts(item.raw_timestamp),
+                    url=getattr(item, "url", ""),
+                )
                 new_items_queue.put((content, item.url, button_text, None, None, query_id, item.photo))
                 # new_items_queue.put((content, item.url, button_text, item.buy_url, "Open buy page", query_id, item.photo))
                 # Add the item to the db
