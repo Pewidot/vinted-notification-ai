@@ -90,7 +90,8 @@ class Item:
 
         Args:
             minutes (int, optional): The number of minutes to consider an item as new.
-                Defaults to 5.
+                Defaults to 20. The scraper passes a window sized from how long
+                the query has been blind (see core.new_item_window_minutes).
 
         Returns:
             bool: True if the item is new, False otherwise.

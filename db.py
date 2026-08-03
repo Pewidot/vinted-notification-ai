@@ -118,7 +118,7 @@ def get_queries():
         cursor = conn.cursor()
         cursor.execute(
             "SELECT id, query, last_item, query_name, telegram_chat_id, telegram_enabled, "
-            "platform, active, refresh_delay, last_scraped "
+            "platform, active, refresh_delay, last_scraped, last_success "
             "FROM queries"
         )
         return cursor.fetchall()
@@ -473,6 +473,34 @@ def mark_query_scraped(query_id, timestamp=None):
         cursor = conn.cursor()
         cursor.execute(
             "UPDATE queries SET last_scraped=? WHERE id=?",
+            (timestamp if timestamp is not None else _time.time(), query_id),
+        )
+        conn.commit()
+        return True
+    except Exception:
+        print_exc()
+        return False
+    finally:
+        if conn:
+            conn.close()
+
+
+def mark_query_success(query_id, timestamp=None):
+    """
+    Remember when a query last returned results.
+
+    Kept apart from last_scraped, which is stamped before the request and keeps
+    advancing while a query only produces errors. The new-item window is sized
+    from this column, so an outage widens it by as much as it cost us.
+    """
+    import time as _time
+
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE queries SET last_success=? WHERE id=?",
             (timestamp if timestamp is not None else _time.time(), query_id),
         )
         conn.commit()

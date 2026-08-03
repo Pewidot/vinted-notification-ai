@@ -1,3 +1,5 @@
+import time
+
 import db
 import debug_log
 import requests
@@ -80,6 +82,42 @@ def normalize_query_for_platform(query, platform):
 # interval and can be a moment early; without this a query whose interval
 # equals the tick would be skipped every other round.
 DUE_TOLERANCE = 3  # seconds
+
+# How far back a listing may have been published and still count as new.
+#
+# Sized from the time a query has actually been blind (its last successful
+# scrape), because that is exactly the span in which a listing could have
+# appeared unseen. The factor buys room for scheduler jitter and for platforms
+# that publish a listing a few minutes before it surfaces on page 1.
+#
+# The floor keeps fast queries at the long-standing 20 minutes. The cap stops a
+# long outage from resurrecting listings that are almost certainly gone: after
+# two days offline you get the last few hours, not two days of dead links.
+NEW_ITEM_WINDOW_FACTOR = 4
+NEW_ITEM_WINDOW_MIN = 20 * 60       # seconds
+NEW_ITEM_WINDOW_MAX = 6 * 60 * 60   # seconds
+
+
+def new_item_window_minutes(last_success, now=None):
+    """
+    Window for is_new_item(), in minutes.
+
+    Args:
+        last_success (float): epoch of the query's last successful scrape,
+            0/None for a query that has never returned anything.
+        now (float, optional): current epoch, for tests.
+
+    Returns:
+        float: minutes, clamped between NEW_ITEM_WINDOW_MIN and _MAX.
+    """
+    # No successful scrape yet: a fresh query must not treat all of page 1 as
+    # new, so it starts at the floor instead of "blind since 1970".
+    if not last_success:
+        return NEW_ITEM_WINDOW_MIN / 60.0
+    now = time.time() if now is None else now
+    blind = max(0.0, now - float(last_success))
+    window = blind * NEW_ITEM_WINDOW_FACTOR
+    return min(max(window, NEW_ITEM_WINDOW_MIN), NEW_ITEM_WINDOW_MAX) / 60.0
 
 
 def _apply_query_settings(query_id, refresh_delay=None):
@@ -427,10 +465,16 @@ def _scrape_platform_queries(platform, queries, items_per_query, queue):
         # Stamp before scraping: a query that keeps failing must not be retried
         # on every single tick, it waits for its own interval like the others.
         db.mark_query_scraped(query[0])
+        # Sized from the last successful scrape, so a query that was blocked or
+        # blocked-out for a while still recognises what appeared meanwhile.
+        last_success = query[10] if len(query) > 10 and query[10] else 0
+        window = new_item_window_minutes(last_success)
         try:
             logger.info(f"[{platform.upper()}] Scraping query {query[0]}: {query[1]}")
             debug_log.log(query[0], "request", f"Requesting {platform}",
-                          url=query[1], items_per_query=items_per_query)
+                          url=query[1], items_per_query=items_per_query,
+                          new_item_window=f"{window:.0f} min",
+                          last_success=_fmt_ts(last_success) or "never")
 
             # Search for items on the query's platform
             if platform == "kleinanzeigen":
@@ -444,23 +488,30 @@ def _scrape_platform_queries(platform, queries, items_per_query, queue):
             else:
                 all_items = vinted.items.search(query[1], nbr_items=items_per_query)
 
+            # The page answered, so the query is no longer blind - stamp before
+            # filtering, otherwise the window would keep growing on a quiet query.
+            db.mark_query_success(query[0])
+
             # Filter to only include new items
-            data = [item for item in all_items if item.is_new_item()]
+            data = [item for item in all_items if item.is_new_item(minutes=window)]
 
             logger.info(
                 f"[{platform.upper()}] Found {len(data)} new item(s) "
-                f"(of {len(all_items)} scraped) for query {query[0]}"
+                f"(of {len(all_items)} scraped) for query {query[0]}, "
+                f"window {window:.0f} min"
             )
             debug_log.log(query[0], "result",
                           f"{len(all_items)} listing(s) returned, {len(data)} count as new",
-                          returned=len(all_items), new=len(data))
+                          returned=len(all_items), new=len(data),
+                          new_item_window=f"{window:.0f} min")
             # Record every listing the page returned, so a missing one can be
             # traced to "never came back" vs "came back but was filtered"
             for it in all_items:
+                is_new = it.is_new_item(minutes=window)
                 debug_log.log(
                     query[0],
-                    "listing" if it.is_new_item() else "listing-old",
-                    ("new" if it.is_new_item() else "older than the new-item window")
+                    "listing" if is_new else "listing-old",
+                    ("new" if is_new else f"published more than {window:.0f} min ago")
                     + f": {getattr(it, 'title', '')[:70]}",
                     item=it.id,
                     price=getattr(it, "price", ""),
@@ -502,9 +553,7 @@ def process_items(queue):
     # Each query may define its own refresh interval; the global setting is the
     # default. The scheduler ticks faster than the shortest interval, so this
     # decides which queries are actually due right now.
-    import time as _time
-
-    now = _time.time()
+    now = time.time()
     try:
         default_delay = int(db.get_parameter("query_refresh_delay") or 60)
     except (TypeError, ValueError):
