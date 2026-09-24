@@ -488,6 +488,16 @@ def _scrape_platform_queries(platform, queries, items_per_query, queue):
             else:
                 all_items = vinted.items.search(query[1], nbr_items=items_per_query)
 
+            # An empty first page is still a successful baseline. Without this,
+            # the first item that appears later would be mistaken for the
+            # initial catalogue and silently primed instead of announced.
+            if (
+                platform == "vinted"
+                and not all_items
+                and db.get_last_timestamp(query[0]) is None
+            ):
+                db.update_last_timestamp(query[0], int(time.time()))
+
             # The page answered, so the query is no longer blind - stamp before
             # filtering, otherwise the window would keep growing on a quiet query.
             db.mark_query_success(query[0])
@@ -614,12 +624,47 @@ def clear_item_queue(items_queue, new_items_queue):
     if not items_queue.empty():
         data, query_id = items_queue.get()
         banwords_str = db.get_parameter("banwords")
+
+        # Timestamp-less Vinted results use an observation timestamp. On the
+        # first successful run, prime the ID store silently so adding a query
+        # does not announce the entire first page.
+        last_query_timestamp = db.get_last_timestamp(query_id)
+        timestamp_less = any(
+            getattr(item, "has_real_timestamp", True) is False for item in data
+        )
+        if last_query_timestamp is None and timestamp_less:
+            logger.info(
+                f"First run for query {query_id}: recording {len(data)} Vinted "
+                "item(s) without notifications"
+            )
+            latest_seen = None
+            for item in data:
+                latest_seen = max(latest_seen or 0, item.raw_timestamp)
+                if not db.is_item_in_db_by_id(item.id):
+                    db.add_item_to_db(
+                        id=item.id,
+                        timestamp=item.raw_timestamp,
+                        price=item.price,
+                        title=item.title,
+                        photo_url=item.photo,
+                        query_id=query_id,
+                        currency=item.currency,
+                        url=item.url,
+                    )
+            if latest_seen is not None:
+                db.update_last_timestamp(query_id, latest_seen)
+            debug_log.log(
+                query_id, "prime",
+                f"Recorded {len(data)} existing Vinted listing(s) silently",
+            )
+            return
+
         for item in reversed(data):
 
             # If already in db, pass
-            last_query_timestamp = db.get_last_timestamp(query_id)
             if (
-                last_query_timestamp is not None
+                getattr(item, "has_real_timestamp", True)
+                and last_query_timestamp is not None
                 and last_query_timestamp >= item.raw_timestamp
             ):
                 debug_log.log(
@@ -643,7 +688,13 @@ def clear_item_queue(items_queue, new_items_queue):
             elif getattr(item, "platform", "vinted") == "vinted" and db.get_allowlist() != 0 and (
                 get_user_country(item.raw_data["user"]["id"])
             ) not in (db.get_allowlist() + ["XX"]):
-                db.update_last_timestamp(query_id, item.raw_timestamp)
+                if getattr(item, "has_real_timestamp", True):
+                    db.update_last_timestamp(query_id, item.raw_timestamp)
+                else:
+                    db.add_item_to_db(
+                        item.id, item.title, query_id, item.price,
+                        item.raw_timestamp, item.photo, item.currency, item.url,
+                    )
                 debug_log.log(
                     query_id, "skip", "Seller country not in the allowlist",
                     item=item.id, title=(getattr(item, "title", "") or "")[:70],
@@ -652,7 +703,13 @@ def clear_item_queue(items_queue, new_items_queue):
             # Check if the item title contains any banwords
             elif banwords_str and contains_banwords(item.title, banwords_str):
                 # If it contains banwords, just update the timestamp and skip
-                db.update_last_timestamp(query_id, item.raw_timestamp)
+                if getattr(item, "has_real_timestamp", True):
+                    db.update_last_timestamp(query_id, item.raw_timestamp)
+                else:
+                    db.add_item_to_db(
+                        item.id, item.title, query_id, item.price,
+                        item.raw_timestamp, item.photo, item.currency, item.url,
+                    )
                 debug_log.log(
                     query_id, "skip", "Title contains a banword",
                     item=item.id, title=(getattr(item, "title", "") or "")[:70],
@@ -750,5 +807,3 @@ def contains_banwords(title, banwords_str):
             return True
 
     return False
-
-

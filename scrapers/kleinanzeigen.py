@@ -30,6 +30,16 @@ MAX_PROXY_RETRIES = 3
 PRICE_RE = re.compile(r"(\d{1,3}(?:\.\d{3})*(?:,\d+)?)")
 
 
+def _text_next_to_icon(article, icon_name):
+    """Return the text paired with one of Kleinanzeigen's semantic icons."""
+    icon = article.find("svg", attrs={"data-title": icon_name})
+    if not icon:
+        return ""
+    container = icon.parent
+    value = container.find("span") if container else None
+    return value.get_text(" ", strip=True) if value else ""
+
+
 def _parse_price(price_text):
     """
     Parse a Kleinanzeigen price string like '1.234 €', '120 € VB' or 'Zu verschenken'.
@@ -102,19 +112,52 @@ class KleinanzeigenItem:
             last_segment = self.url.rstrip("/").split("/")[-1]
             self.id = last_segment.split("-")[0]
 
-        title_el = article.find("h2", class_="text-module-begin") or article.find("a", class_="ellipsis")
+        # The old result cards used h2.text-module-begin/a.ellipsis.  Since
+        # September 2026 the classes are generated utility classes, while the
+        # h3 and listing link remain useful structural hooks.
+        title_el = (
+            article.select_one('h3 a[href*="/s-anzeige/"]')
+            or article.find("h2", class_="text-module-begin")
+            or article.find("a", class_="ellipsis")
+        )
         self.title = title_el.get_text(strip=True) if title_el else "No title"
 
         price_el = article.find("p", class_="aditem-main--middle--price-shipping--price")
+        if not price_el:
+            # Current cards do not expose a price-specific data attribute.  A
+            # price paragraph is the only paragraph containing a euro amount,
+            # VB, or one of the two non-numeric price labels.
+            price_el = next(
+                (
+                    element
+                    for element in article.find_all("p")
+                    if re.search(
+                        r"(?:\d[\d.,]*\s*€|\bVB\b|Zu verschenken|Tausch)",
+                        element.get_text(" ", strip=True),
+                        re.IGNORECASE,
+                    )
+                ),
+                None,
+            )
         self.price_text = price_el.get_text(strip=True) if price_el else ""
         self.price = _parse_price(self.price_text)
 
         # Location goes into brand_title so the {brand} message template slot shows it
         location_el = article.find("div", class_="aditem-main--top--left")
-        self.brand_title = location_el.get_text(strip=True) if location_el else "Kleinanzeigen"
+        location_text = (
+            location_el.get_text(" ", strip=True)
+            if location_el
+            else _text_next_to_icon(article, "locationOutline")
+        )
+        self.brand_title = location_text or "Kleinanzeigen"
 
         date_el = article.find("div", class_="aditem-main--top--right")
-        self.raw_timestamp = _parse_date(date_el.get_text(strip=True) if date_el else "")
+        date_text = (
+            date_el.get_text(" ", strip=True)
+            if date_el
+            else _text_next_to_icon(article, "calendarOutline")
+        )
+        self.raw_timestamp = _parse_date(date_text)
 
         self.photo = None
         img = article.find("img")
@@ -195,6 +238,9 @@ def _fetch(url):
         try:
             response = session.get(url, timeout=timeout)
             if response.status_code == 200:
+                # Kleinanzeigen currently omits a charset from Content-Type,
+                # causing requests to assume ISO-8859-1 for its UTF-8 HTML.
+                response.encoding = "utf-8"
                 return response.text
             last_error = requests.HTTPError(f"HTTP {response.status_code}")
             logger.warning(
@@ -224,7 +270,12 @@ def parse_html(html):
     """
     soup = BeautifulSoup(html, "html.parser")
     items = []
-    for article in soup.find_all("article", class_="aditem"):
+    # Current cards have generated utility classes.  data-adid is the stable
+    # listing identifier and was also present in the legacy markup.
+    articles = soup.select("article[data-adid]")
+    if not articles:
+        articles = soup.find_all("article", class_="aditem")
+    for article in articles:
         try:
             item = KleinanzeigenItem(article)
             if item.id and "/s-anzeige/" in item.url:

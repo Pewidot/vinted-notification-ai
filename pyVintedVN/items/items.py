@@ -43,16 +43,11 @@ class Items:
         Raises:
             HTTPError: If the request to the Vinted API fails.
         """
-        # Extract the domain from the URL
+        # Extract the www domain used to bootstrap anonymous auth.
         locale = urlparse(url).netloc
 
         # Parse the URL to get the API parameters
         params = self.parse_url(url, nbr_items, page, time)
-
-        # Construct the API URL
-        api_url = (
-            f"https://{locale}{Urls.VINTED_API_URL}/{Urls.VINTED_PRODUCTS_ENDPOINT}"
-        )
 
         try:
             # set_locale() and get() must not be split by another thread: the
@@ -61,6 +56,12 @@ class Items:
             # the request with the wrong Host header.
             with requester.lock:
                 requester.set_locale(locale)
+                # Build this only after selecting the locale; the requester is
+                # shared and may still point at the previous query's country.
+                api_url = (
+                    f"https://{requester.get_api_host()}"
+                    f"{Urls.VINTED_API_URL}/{Urls.VINTED_PRODUCTS_ENDPOINT}"
+                )
                 response = requester.get(url=api_url, params=params)
             response.raise_for_status()
 
@@ -70,7 +71,7 @@ class Items:
 
             # Return either Item objects or raw JSON data
             if not json:
-                return [Item(_item) for _item in items]
+                return [Item(_item, locale=locale) for _item in items]
             else:
                 return items
 
@@ -95,45 +96,26 @@ class Items:
         # Parse the query parameters from the URL
         queries = parse_qsl(urlparse(url).query)
 
-        # Construct the parameters dictionary
+        def joined(*names):
+            return ",".join(value for key, value in queries if key in names)
+
+        # svc-catalogue renamed id filters to attribute_ids[<type>]. Legacy
+        # names still return HTTP 200 but are silently ignored.
         params = {
-            "search_text": "+".join(
-                map(str, [tpl[1] for tpl in queries if tpl[0] == "search_text"])
+            "search_text": joined("search_text"),
+            "attribute_ids[video_game_platform]": joined(
+                "video_game_platform_ids[]", "video_game_platform_ids"
             ),
-            "video_game_platform_ids": ",".join(
-                map(
-                    str,
-                    [
-                        tpl[1]
-                        for tpl in queries
-                        if tpl[0] == "video_game_platform_ids[]"
-                    ],
-                )
-            ),
-            "catalog_ids": ",".join(
-                map(str, [tpl[1] for tpl in queries if tpl[0] == "catalog[]"])
-            ),
-            "color_ids": ",".join(
-                map(str, [tpl[1] for tpl in queries if tpl[0] == "color_ids[]"])
-            ),
-            "brand_ids": ",".join(
-                map(str, [tpl[1] for tpl in queries if tpl[0] == "brand_ids[]"])
-            ),
-            "size_ids": ",".join(
-                map(str, [tpl[1] for tpl in queries if tpl[0] == "size_ids[]"])
-            ),
-            "material_ids": ",".join(
-                map(str, [tpl[1] for tpl in queries if tpl[0] == "material_ids[]"])
-            ),
-            "status_ids": ",".join(
-                map(str, [tpl[1] for tpl in queries if tpl[0] == "status_ids[]"])
-            ),
-            "country_ids": ",".join(
-                map(str, [tpl[1] for tpl in queries if tpl[0] == "country_ids[]"])
-            ),
-            "city_ids": ",".join(
-                map(str, [tpl[1] for tpl in queries if tpl[0] == "city_ids[]"])
-            ),
+            "attribute_ids[catalog]": joined("catalog[]", "catalog_ids[]", "catalog_ids"),
+            "attribute_ids[color]": joined("color_ids[]", "color_ids"),
+            "attribute_ids[brand]": joined("brand_ids[]", "brand_id[]", "brand_ids"),
+            "attribute_ids[size]": joined("size_ids[]", "size_ids"),
+            "attribute_ids[material]": joined("material_ids[]", "material_ids"),
+            "attribute_ids[status]": joined("status_ids[]", "status_ids"),
+            # country/city keep their legacy names: attribute_ids variants are
+            # accepted by the service but currently match no results.
+            "country_ids": joined("country_ids[]", "country_ids"),
+            "city_ids": joined("city_ids[]", "city_ids"),
             "is_for_swap": ",".join(
                 map(str, [1 for tpl in queries if tpl[0] == "disposal[]"])
             ),
@@ -154,7 +136,8 @@ class Items:
             "time": time,
         }
 
-        return params
+        # Unlike the old endpoint, svc-catalogue rejects blank values with 400.
+        return {key: value for key, value in params.items() if value not in ("", None)}
 
     # Aliases for backward compatibility
     parseUrl = parse_url

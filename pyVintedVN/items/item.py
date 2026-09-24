@@ -1,3 +1,4 @@
+import time
 from datetime import datetime, timezone
 
 
@@ -18,40 +19,51 @@ class Item:
         price (float): The price of the item.
         photo (str): The URL of the item's photo.
         url (str): The URL of the item on Vinted.
-        created_at_ts (datetime): The timestamp when the item was created.
-        raw_timestamp (int): The raw timestamp value from the API.
+        created_at_ts (datetime): Listing time, or the first observation time.
+        raw_timestamp (int): Listing timestamp, or first observation timestamp.
+        has_real_timestamp (bool): Whether Vinted supplied a listing timestamp.
     """
 
-    def __init__(self, data):
+    def __init__(self, data, locale=None):
         """
         Initialize an Item with data from the Vinted API.
 
         Args:
             data (dict): The item data from the Vinted API.
+            locale (str, optional): www.vinted.<tld> host used to expand relative URLs.
         """
         self.raw_data = data
         self.id = data["id"]
         self.title = data["title"]
-        self.brand_title = data["brand_title"]
-        try:
-            self.size_title = data["size_title"]
-        except KeyError:
-            # If size_title is not available, set it to None
-            self.size_title = None
+        item_box = data.get("item_box") or {}
+        first_line = item_box.get("first_line")
+        self.brand_title = data.get("brand_title") or (
+            first_line if first_line and first_line != self.title else None
+        )
+        self.size_title = data.get("size_title")
+        if not self.size_title:
+            second_line = item_box.get("second_line") or ""
+            self.size_title = (
+                second_line.split(" · ", 1)[0] if " · " in second_line else None
+            )
         self.currency = data["price"]["currency_code"]
         self.price = data["price"]["amount"]
-        self.photo = data["photo"]["url"]
+        self.photo = (data.get("photo") or {}).get("url")
         self.url = data["url"]
+        if self.url.startswith("/") and locale:
+            self.url = f"https://{locale}{self.url}"
         # We keep everything before the "items"
         self.buy_url = (
-            data["url"].split("items")[0]
+            self.url.split("items")[0]
             + "transaction/buy/new?source_screen=item&transaction%5Bitem_id%5D="
             + str(data["id"])
         )
-        self.created_at_ts = datetime.fromtimestamp(
-            data["photo"]["high_resolution"]["timestamp"], tz=timezone.utc
+        real_timestamp = ((data.get("photo") or {}).get("high_resolution") or {}).get(
+            "timestamp"
         )
-        self.raw_timestamp = data["photo"]["high_resolution"]["timestamp"]
+        self.has_real_timestamp = real_timestamp is not None
+        self.raw_timestamp = real_timestamp if real_timestamp is not None else int(time.time())
+        self.created_at_ts = datetime.fromtimestamp(self.raw_timestamp, tz=timezone.utc)
 
     def __eq__(self, other):
         """
@@ -96,6 +108,10 @@ class Item:
         Returns:
             bool: True if the item is new, False otherwise.
         """
+        # svc-catalogue no longer exposes listing time. Its results must be
+        # classified by first-seen ID in the caller instead of guessed from IDs.
+        if not self.has_real_timestamp:
+            return True
         delta = datetime.now(timezone.utc) - self.created_at_ts
         return delta.total_seconds() < minutes * 60
 

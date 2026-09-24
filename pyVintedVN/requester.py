@@ -26,6 +26,7 @@ IMPERSONATE_BROWSER = "chrome"
 # Add the parent directory to sys.path to import logger
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from logger import get_logger
+from pyVintedVN.settings import Urls
 
 # Get logger for this module
 logger = get_logger(__name__)
@@ -68,8 +69,8 @@ class Requester:
             # Grabs a user agent from the database
             "User-Agent": random.choice(user_agents) if user_agents else "Mozilla/5.0",
             **(default_headers or {}),
-            "Host": "www.vinted.fr",
         }
+        self.locale = "www.vinted.fr"
         self.VINTED_AUTH_URL = "https://www.vinted.fr/"
         self.MAX_RETRIES = 3
 
@@ -102,6 +103,7 @@ class Requester:
         Args:
             locale (str): The locale domain to use (e.g., 'www.vinted.fr', 'www.vinted.de')
         """
+        self.locale = locale
         self.VINTED_AUTH_URL = f"https://{locale}/"
         # Get user agents and default headers from the database
         user_agents_json = db.get_parameter("user_agents")
@@ -116,19 +118,43 @@ class Requester:
         self.HEADER = {
             "User-Agent": random.choice(user_agents) if user_agents else "Mozilla/5.0",
             **(default_headers or {}),
-            "Host": f"{locale}",
         }
+        # Auth and catalogue requests use different hosts. A manually pinned
+        # Host header would send www.vinted.<tld> to api.vinted.<tld>.
+        self.session.headers.pop("Host", None)
         self.session.headers.update(self.HEADER)
         if self.debug:
             logger.debug(
                 f"Locale set to {locale} with User-Agent: {self.HEADER['User-Agent']}"
             )
 
+    def get_api_host(self):
+        """Return api.vinted.<tld> for the currently selected www locale."""
+        locale = self.locale
+        if locale.startswith(Urls.VINTED_AUTH_HOST_PREFIX):
+            locale = locale[len(Urls.VINTED_AUTH_HOST_PREFIX):]
+        return f"{Urls.VINTED_API_HOST_PREFIX}{locale}"
+
+    def _auth_headers(self):
+        """Build authentication headers from the anonymous www-host cookies."""
+        headers = {
+            "Accept": "application/json",
+            "Origin": self.VINTED_AUTH_URL.rstrip("/"),
+            "Referer": self.VINTED_AUTH_URL,
+        }
+        token = self.session.cookies.get("access_token_web")
+        anon_id = self.session.cookies.get("anon_id")
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        if anon_id:
+            headers["x-anon-id"] = anon_id
+        return headers
+
     def get(self, url, params=None):
         """
         Make a GET request with retry logic and proxy rotation.
 
-        If a 401 status code is received, it will attempt to refresh cookies
+        If a 401/403 status code is received, it will attempt to refresh cookies
         and retry the request up to MAX_RETRIES times.
         If proxy errors occur, it will try with a different proxy.
 
@@ -159,13 +185,23 @@ class Requester:
         proxy_retries = 0
         max_proxy_retries = 3  # Try up to 3 different proxies
 
+        is_catalogue_request = url.startswith("https://api.vinted.")
+        if is_catalogue_request and not self.session.cookies.get("access_token_web"):
+            self.set_cookies()
+
         while tried < self.MAX_RETRIES:
             tried += 1
             try:
-                response = self.session.get(url, params=params, timeout=self.REQUEST_TIMEOUT)
-                if response.status_code in (401, 404) and tried < self.MAX_RETRIES:
+                request_headers = self._auth_headers() if is_catalogue_request else None
+                response = self.session.get(
+                    url,
+                    params=params,
+                    headers=request_headers,
+                    timeout=self.REQUEST_TIMEOUT,
+                )
+                if response.status_code in (401, 403) and tried < self.MAX_RETRIES:
                     logger.warning(
-                        f"Cookies invalid (HTTP {response.status_code}), "
+                        f"Vinted token rejected (HTTP {response.status_code}), "
                         f"retrying {tried}/{self.MAX_RETRIES} | Proxy: {current_proxy or 'None'}"
                     )
                     self.set_cookies()
@@ -212,8 +248,17 @@ class Requester:
                             proxy_configured, current_proxy = proxies.configure_proxy(self.session, "vinted")
 
                         tried = 0
+                        self.set_cookies()
                         continue
 
+                    logger.error(
+                        f"Request failed with HTTP {response.status_code} | "
+                        f"Proxy: {current_proxy or 'None'}"
+                    )
+                    return response
+                else:
+                    # 400 (bad parameters), 404 (wrong route), 429, and server
+                    # errors are not repaired by refreshing authentication.
                     logger.error(
                         f"Request failed with HTTP {response.status_code} | "
                         f"Proxy: {current_proxy or 'None'}"
@@ -239,11 +284,15 @@ class Requester:
                     proxy_configured, current_proxy = proxies.configure_proxy(self.session, "vinted")
                     if proxy_configured:
                         logger.info(f"Retrying with new proxy: {current_proxy}")
+                        if is_catalogue_request:
+                            self.set_cookies()
                         tried -= 1  # Don't count proxy errors against regular retry limit
                         continue
                     else:
                         logger.warning("No more proxies available, continuing without proxy")
                         current_proxy = None
+                        if is_catalogue_request:
+                            self.set_cookies()
                         tried -= 1
                         continue
                 else:
@@ -323,7 +372,13 @@ class Requester:
         self.session.cookies.clear()
         try:
             self.session.head(self.VINTED_AUTH_URL, timeout=self.REQUEST_TIMEOUT)
-            if self.debug:
+            token = self.session.cookies.get("access_token_web")
+            anon_id = self.session.cookies.get("anon_id")
+            if not token or not anon_id:
+                logger.warning(
+                    f"Vinted did not return both auth cookies from {self.VINTED_AUTH_URL}"
+                )
+            elif self.debug:
                 logger.debug("Cookies set!")
         except Exception:
             if self.debug:
