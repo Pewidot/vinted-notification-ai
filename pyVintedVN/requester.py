@@ -103,6 +103,14 @@ class Requester:
         Args:
             locale (str): The locale domain to use (e.g., 'www.vinted.fr', 'www.vinted.de')
         """
+        # Anonymous auth cookies are marketplace-specific.  Reusing a token
+        # obtained from (for example) vinted.com after switching to vinted.de
+        # can make the catalogue behave as if the request still belonged to
+        # the previous market.  Clear the jar so _get_locked() bootstraps a
+        # fresh German/French/etc. anonymous session on the next API request.
+        if locale != self.locale:
+            self.session.cookies.clear()
+
         self.locale = locale
         self.VINTED_AUTH_URL = f"https://{locale}/"
         # Get user agents and default headers from the database

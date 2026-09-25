@@ -83,6 +83,58 @@ class VintedCatalogueTests(unittest.TestCase):
         self.assertEqual(requester._auth_headers()["x-anon-id"], "anonymous")
         self.assertNotIn("Host", requester.session.headers)
 
+    def test_switching_market_clears_anonymous_auth_cookies(self):
+        requester = Requester()
+        requester.set_locale("www.vinted.com")
+        requester.session.cookies.set("access_token_web", "us-token")
+        requester.session.cookies.set("anon_id", "us-anonymous")
+
+        requester.set_locale("www.vinted.de")
+
+        self.assertIsNone(requester.session.cookies.get("access_token_web"))
+        self.assertIsNone(requester.session.cookies.get("anon_id"))
+        self.assertEqual(requester.VINTED_AUTH_URL, "https://www.vinted.de/")
+
+    @patch("core.db.get_parameter", return_value="de")
+    @patch("core.requester")
+    def test_cross_market_item_must_be_buyable_from_germany(
+        self, requester_mock, _get_parameter
+    ):
+        item = self.make_item()
+        item.url = "https://www.vinted.co.uk/items/12345678901-nike-trainers"
+        requester_mock.session.cookies.get.return_value = "german-token"
+        response = MagicMock()
+        response.status_code = 200
+        response.text = (
+            r'{\"can_buy\":false,\"instant_buy\":false,'
+            r'\"item_id\":\"12345678901\"}'
+        )
+        requester_mock.get.return_value = response
+
+        self.assertFalse(core.can_buy_from_delivery_market(item))
+        requester_mock.set_locale.assert_called_once_with("www.vinted.de")
+        requester_mock.get.assert_called_once_with(
+            "https://www.vinted.de/items/12345678901-nike-trainers"
+        )
+
+    @patch("core.db.get_parameter", return_value="de")
+    @patch("core.requester")
+    def test_delivery_check_ignores_other_items_in_page(
+        self, requester_mock, _get_parameter
+    ):
+        item = self.make_item()
+        item.url = "https://www.vinted.fr/items/12345678901-nike-trainers"
+        requester_mock.session.cookies.get.return_value = "german-token"
+        response = MagicMock()
+        response.status_code = 200
+        response.text = (
+            r'{\"can_buy\":true,\"item_id\":\"999\"}'
+            r'{\"can_buy\":false,\"item_id\":\"12345678901\"}'
+        )
+        requester_mock.get.return_value = response
+
+        self.assertFalse(core.can_buy_from_delivery_market(item))
+
     @patch("core.debug_log.log")
     @patch("core.db.update_last_timestamp")
     @patch("core.db.add_item_to_db")

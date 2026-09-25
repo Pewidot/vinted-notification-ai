@@ -47,6 +47,16 @@
                                         </div>
                                     </div>
                                     <div class="row">
+                                        <div class="col-md-6">
+                                            <div class="mb-3">
+                                                <label for="vinted_delivery_market" class="form-label">Vinted Delivery Market</label>
+                                                <input type="text" class="form-control" id="vinted_delivery_market"
+                                                       name="vinted_delivery_market"
+                                                       value="{{ params.vinted_delivery_market or 'de' }}"
+                                                       maxlength="5" placeholder="de">
+                                                <small class="form-text text-muted">Only notify for cross-market items purchasable through this storefront (for example, de for Germany). Seller country is unrestricted.</small>
+                                            </div>
+                                        </div>
                                         <div class="col-md-12">
                                             <div class="mb-3">
                                                 <label for="banwords-input" class="form-label">Banwords</label>

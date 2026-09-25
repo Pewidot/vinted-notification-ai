@@ -1,3 +1,4 @@
+import re
 import time
 
 import db
@@ -9,6 +10,77 @@ from logger import get_logger
 
 # Get logger for this module
 logger = get_logger(__name__)
+
+
+def _vinted_delivery_host():
+    """Return the Vinted storefront used to evaluate delivery eligibility."""
+    market = (db.get_parameter("vinted_delivery_market") or "de").strip().lower()
+    market = market.removeprefix("www.vinted.").removeprefix("vinted.")
+    if not re.fullmatch(r"[a-z]{2}(?:\.[a-z]{2})?", market):
+        logger.warning(
+            "Invalid Vinted delivery market %r; falling back to Germany", market
+        )
+        market = "de"
+    return f"www.vinted.{market}"
+
+
+def can_buy_from_delivery_market(item):
+    """
+    Check whether a cross-market Vinted item is purchasable in the configured
+    delivery market.
+
+    The catalogue no longer exposes shipping eligibility and ignores its old
+    country filter. The storefront item page still embeds a market-specific
+    ``can_buy`` value. Returns None if Vinted cannot be checked, so a temporary
+    network/parser failure does not permanently discard a real listing.
+    """
+    target_host = _vinted_delivery_host()
+    parsed = urlparse(item.url)
+
+    # Results obtained directly from the target storefront are already scoped
+    # by that storefront's anonymous session.
+    if parsed.netloc.lower() == target_host:
+        return True
+
+    target_url = urlunparse(
+        ("https", target_host, parsed.path, parsed.params, parsed.query, parsed.fragment)
+    )
+    try:
+        with requester.lock:
+            requester.set_locale(target_host)
+            if not requester.session.cookies.get("access_token_web"):
+                requester.set_cookies()
+            response = requester.get(target_url)
+        if response.status_code == 404:
+            return False
+        response.raise_for_status()
+    except Exception as exc:
+        logger.warning(
+            "Could not check whether Vinted item %s ships via %s: %s",
+            item.id,
+            target_host,
+            exc,
+        )
+        return None
+
+    # The page serialises its application JSON inside a script string, hence
+    # the escaped quotes. Tie the value to this item id so recommendation cards
+    # elsewhere in the HTML cannot affect the result.
+    pattern = re.compile(
+        r'\\"can_buy\\":(true|false)[^{}]{0,500}'
+        r'\\"item_id\\":\\"?'
+        + re.escape(str(item.id))
+        + r'\\"?'
+    )
+    matches = pattern.findall(response.text)
+    if not matches:
+        logger.warning(
+            "Vinted item %s did not expose delivery eligibility for %s",
+            item.id,
+            target_host,
+        )
+        return None
+    return any(value == "true" for value in matches)
 
 
 def _fmt_ts(ts):
@@ -699,6 +771,29 @@ def clear_item_queue(items_queue, new_items_queue):
                     query_id, "skip", "Seller country not in the allowlist",
                     item=item.id, title=(getattr(item, "title", "") or "")[:70],
                     allowlist=db.get_allowlist(),
+                )
+            # A seller may be abroad and still ship to the target market. For listings
+            # found through another Vinted storefront, check purchase
+            # eligibility through the configured delivery storefront instead
+            # of filtering on the seller's country.
+            elif (
+                getattr(item, "platform", "vinted") == "vinted"
+                and can_buy_from_delivery_market(item) is False
+            ):
+                if getattr(item, "has_real_timestamp", True):
+                    db.update_last_timestamp(query_id, item.raw_timestamp)
+                else:
+                    db.add_item_to_db(
+                        item.id, item.title, query_id, item.price,
+                        item.raw_timestamp, item.photo, item.currency, item.url,
+                    )
+                debug_log.log(
+                    query_id,
+                    "skip",
+                    "Item cannot be bought from the configured delivery market",
+                    item=item.id,
+                    title=(getattr(item, "title", "") or "")[:70],
+                    delivery_host=_vinted_delivery_host(),
                 )
             # Check if the item title contains any banwords
             elif banwords_str and contains_banwords(item.title, banwords_str):
