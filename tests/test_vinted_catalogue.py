@@ -1,9 +1,12 @@
+import sqlite3
+import tempfile
 import time
 import unittest
 from queue import Queue
 from unittest.mock import ANY, MagicMock, patch
 
 import core
+import db
 from pyVintedVN.items.item import Item
 from pyVintedVN.items.items import Items
 from pyVintedVN.requester import Requester
@@ -134,6 +137,79 @@ class VintedCatalogueTests(unittest.TestCase):
         requester_mock.get.return_value = response
 
         self.assertFalse(core.can_buy_from_delivery_market(item))
+
+    @patch("core.debug_log.log")
+    @patch("core.can_buy_from_delivery_market")
+    @patch("core.db.get_allowlist", return_value=0)
+    @patch("core.db.update_last_timestamp")
+    @patch("core.db.add_item_to_db")
+    @patch("core.db.is_item_in_db_by_id", return_value=False)
+    @patch("core.db.get_last_timestamp", return_value=1)
+    @patch("core.db.get_parameter", return_value="")
+    def test_usd_vinted_listing_is_recorded_without_notification(
+        self,
+        _get_parameter,
+        _get_last_timestamp,
+        _is_known,
+        add_item,
+        _update_watermark,
+        _get_allowlist,
+        delivery_check,
+        debug_log,
+    ):
+        item = self.make_item()
+        item.currency = "USD"
+        incoming = Queue()
+        notifications = Queue()
+        incoming.put(([item], 42))
+
+        core.clear_item_queue(incoming, notifications)
+
+        self.assertTrue(notifications.empty())
+        add_item.assert_called_once()
+        delivery_check.assert_not_called()
+        self.assertEqual(
+            debug_log.call_args.kwargs["currency"],
+            "USD",
+        )
+
+    def test_non_eur_vinted_items_are_hidden_from_history(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = f"{temp_dir}/items.db"
+            connection = sqlite3.connect(db_path)
+            connection.executescript(
+                """
+                CREATE TABLE queries (
+                    id INTEGER PRIMARY KEY,
+                    query TEXT,
+                    query_name TEXT
+                );
+                CREATE TABLE items (
+                    item INTEGER,
+                    title TEXT,
+                    price TEXT,
+                    currency TEXT,
+                    timestamp INTEGER,
+                    photo_url TEXT,
+                    query_id INTEGER,
+                    url TEXT
+                );
+                INSERT INTO queries VALUES
+                    (1, 'https://www.vinted.com/catalog?search_text=test', 'Vinted'),
+                    (2, 'https://www.ebay.com/sch/test', 'eBay');
+                INSERT INTO items VALUES
+                    (1, 'Euro Vinted', '10', 'EUR', 1, NULL, 1, NULL),
+                    (2, 'Dollar Vinted', '10', 'USD', 2, NULL, 1, NULL),
+                    (3, 'Dollar eBay', '10', 'USD', 3, NULL, 2, NULL);
+                """
+            )
+            connection.commit()
+            connection.close()
+
+            with patch.object(db, "DB_PATH", db_path):
+                self.assertEqual([row[0] for row in db.get_items()], [3, 1])
+                self.assertEqual(db.get_total_items_count(), 2)
+                self.assertEqual(db.get_last_found_item()[0], 3)
 
     @patch("core.debug_log.log")
     @patch("core.db.update_last_timestamp")

@@ -3,6 +3,15 @@ from traceback import print_exc
 
 DB_PATH = "./data/vinted_notifications.db"
 
+# The items table doubles as the persistent ID-deduplication store, so filtered
+# Vinted listings still need to be recorded there. Keep non-EUR Vinted rows out
+# of user-facing history and dashboard statistics while leaving other platforms
+# untouched.
+VISIBLE_ITEM_SQL = (
+    "(q.query NOT LIKE '%vinted.%' "
+    "OR UPPER(COALESCE(i.currency, '')) = 'EUR')"
+)
+
 
 def get_db_connection():
     conn = sqlite3.connect(DB_PATH)
@@ -996,7 +1005,10 @@ def get_items(limit=50, query=None):
                 query_id = result[0]
                 # Get items with the matching query_id
                 cursor.execute(
-                    "SELECT i.item, i.title, i.price, i.currency, i.timestamp, q.query, i.photo_url, q.query_name, i.url FROM items i JOIN queries q ON i.query_id = q.id WHERE i.query_id=? ORDER BY i.timestamp DESC LIMIT ?",
+                    "SELECT i.item, i.title, i.price, i.currency, i.timestamp, q.query, i.photo_url, q.query_name, i.url "
+                    "FROM items i JOIN queries q ON i.query_id = q.id "
+                    f"WHERE i.query_id=? AND {VISIBLE_ITEM_SQL} "
+                    "ORDER BY i.timestamp DESC LIMIT ?",
                     (query_id, limit),
                 )
             else:
@@ -1004,7 +1016,9 @@ def get_items(limit=50, query=None):
         else:
             # Join with queries table to get the query text
             cursor.execute(
-                "SELECT i.item, i.title, i.price, i.currency, i.timestamp, q.query, i.photo_url, q.query_name, i.url FROM items i JOIN queries q ON i.query_id = q.id ORDER BY i.timestamp DESC LIMIT ?",
+                "SELECT i.item, i.title, i.price, i.currency, i.timestamp, q.query, i.photo_url, q.query_name, i.url "
+                "FROM items i JOIN queries q ON i.query_id = q.id "
+                f"WHERE {VISIBLE_ITEM_SQL} ORDER BY i.timestamp DESC LIMIT ?",
                 (limit,),
             )
         return cursor.fetchall()
@@ -1021,7 +1035,10 @@ def get_total_items_count():
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM items")
+        cursor.execute(
+            "SELECT COUNT(*) FROM items i JOIN queries q ON i.query_id = q.id "
+            f"WHERE {VISIBLE_ITEM_SQL}"
+        )
         return cursor.fetchone()[0]
     except Exception:
         print_exc()
@@ -1052,7 +1069,9 @@ def get_last_found_item():
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT i.item, i.title, i.price, i.currency, i.timestamp, q.query, i.photo_url, i.url FROM items i JOIN queries q ON i.query_id = q.id ORDER BY i.timestamp DESC LIMIT 1"
+            "SELECT i.item, i.title, i.price, i.currency, i.timestamp, q.query, i.photo_url, i.url "
+            "FROM items i JOIN queries q ON i.query_id = q.id "
+            f"WHERE {VISIBLE_ITEM_SQL} ORDER BY i.timestamp DESC LIMIT 1"
         )
         return cursor.fetchone()
     except Exception:
@@ -1070,14 +1089,21 @@ def get_items_per_day():
         cursor = conn.cursor()
 
         # Get total items
-        cursor.execute("SELECT COUNT(*) FROM items")
+        cursor.execute(
+            "SELECT COUNT(*) FROM items i JOIN queries q ON i.query_id = q.id "
+            f"WHERE {VISIBLE_ITEM_SQL}"
+        )
         total_items = cursor.fetchone()[0]
 
         if total_items == 0:
             return 0
 
         # Get earliest and latest timestamps
-        cursor.execute("SELECT MIN(timestamp), MAX(timestamp) FROM items")
+        cursor.execute(
+            "SELECT MIN(i.timestamp), MAX(i.timestamp) "
+            "FROM items i JOIN queries q ON i.query_id = q.id "
+            f"WHERE {VISIBLE_ITEM_SQL}"
+        )
         min_timestamp, max_timestamp = cursor.fetchone()
 
         # Calculate number of days (add 1 to include both start and end days)

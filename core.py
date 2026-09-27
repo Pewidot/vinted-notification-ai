@@ -754,6 +754,29 @@ def clear_item_queue(items_queue, new_items_queue):
                     query_id, "skip", "Already known (announced before)",
                     item=item.id, title=(getattr(item, "title", "") or "")[:70],
                 )
+            # Germany's connected Vinted market uses EUR. Reject USD/GBP and
+            # other currencies before doing seller or item-page lookups; these
+            # listings belong to disconnected markets and cannot be bought
+            # through the German storefront.
+            elif (
+                getattr(item, "platform", "vinted") == "vinted"
+                and str(getattr(item, "currency", "")).upper() != "EUR"
+            ):
+                if getattr(item, "has_real_timestamp", True):
+                    db.update_last_timestamp(query_id, item.raw_timestamp)
+                else:
+                    db.add_item_to_db(
+                        item.id, item.title, query_id, item.price,
+                        item.raw_timestamp, item.photo, item.currency, item.url,
+                    )
+                debug_log.log(
+                    query_id,
+                    "skip",
+                    "Vinted listing is not priced in EUR",
+                    item=item.id,
+                    title=(getattr(item, "title", "") or "")[:70],
+                    currency=getattr(item, "currency", None),
+                )
             # If there's an allowlist and
             # If the user's country is not in the allowlist, we just update the timestamp
             # (country lookup only exists for Vinted items)

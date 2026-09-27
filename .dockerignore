@@ -34,6 +34,10 @@ data/
 **/*.sqlite*
 logs/
 
+# Separate ML experiment/project; it is not imported by the notification bot
+# and contains multi-gigabyte training data and its own virtual environment.
+funkeys_classifier/
+
 # Docker
 Dockerfile
 docker-compose.yml
