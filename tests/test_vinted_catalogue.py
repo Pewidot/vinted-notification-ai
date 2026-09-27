@@ -196,6 +196,12 @@ class VintedCatalogueTests(unittest.TestCase):
                     query_id INTEGER,
                     url TEXT
                 );
+                CREATE TABLE telegram_deliveries (
+                    item TEXT,
+                    chat_id TEXT,
+                    delivered_at NUMERIC DEFAULT (strftime('%s', 'now')),
+                    PRIMARY KEY (item, chat_id)
+                );
                 INSERT INTO queries VALUES
                     (1, 'https://www.vinted.com/catalog?search_text=test', 'Vinted'),
                     (2, 'https://www.ebay.com/sch/test', 'eBay');
@@ -212,6 +218,9 @@ class VintedCatalogueTests(unittest.TestCase):
                 self.assertEqual([row[0] for row in db.get_items()], [3, 1])
                 self.assertEqual(db.get_total_items_count(), 2)
                 self.assertEqual(db.get_last_found_item()[0], 3)
+                self.assertTrue(db.claim_telegram_delivery(123, "chat-a"))
+                self.assertFalse(db.claim_telegram_delivery(123, "chat-a"))
+                self.assertTrue(db.claim_telegram_delivery(123, "chat-b"))
 
     @patch("core.db.mark_vinted_id_baselined")
     @patch("core.db.is_vinted_id_baselined", return_value=False)

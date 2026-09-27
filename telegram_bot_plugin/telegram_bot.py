@@ -1,6 +1,6 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
-from telegram.error import RetryAfter
+from telegram.error import BadRequest, RetryAfter
 import db
 import core
 import asyncio
@@ -266,12 +266,16 @@ class LeRobot:
 
     ### TELEGRAM SPECIFIC FUNCTIONS ###
 
-    async def send_new_post(self, token, chat_id, content, url, text, buy_url=None, buy_text=None, photo_url=None):
+    async def send_new_post(
+        self, token, chat_id, content, url, text, buy_url=None, buy_text=None,
+        photo_url=None, item_id=None
+    ):
         """Send a single item to one bot (by token) and chat.
 
         If a photo URL is available, the item is sent as a real photo with the
         message as caption (reliable across all platforms), otherwise as a text
-        message. Falls back to a text message if sending the photo fails.
+        message. Falls back to text only for a definite Telegram rejection;
+        ambiguous network failures are not retried as a second message.
         """
         try:
             bot = self._get_bot(token)
@@ -299,13 +303,24 @@ class LeRobot:
                             write_timeout=40,
                             reply_markup=markup,
                         )
-                        return
+                        return True
                     except RetryAfter:
                         raise
-                    except Exception as e:
+                    except BadRequest as e:
                         logger.warning(
                             f"send_photo failed ({str(e)[:120]}), falling back to text message"
                         )
+                    except Exception as e:
+                        # A timeout/network error can happen after Telegram has
+                        # accepted the photo. Sending text as a fallback in that
+                        # ambiguous state creates two messages for one listing.
+                        logger.warning(
+                            "send_photo outcome unknown for item %s (%s); "
+                            "not sending a fallback that may duplicate it",
+                            item_id,
+                            str(e)[:120],
+                        )
+                        return False
 
                 await bot.send_message(
                     chat_id,
@@ -315,6 +330,7 @@ class LeRobot:
                     write_timeout=40,
                     reply_markup=markup,
                 )
+                return True
         except RetryAfter as e:
             retry_after = e.retry_after
             logger.error(
@@ -322,9 +338,13 @@ class LeRobot:
             )
             await asyncio.sleep(retry_after + 2)
             # Retry sending the message
-            await self.send_new_post(token, chat_id, content, url, text, buy_url, buy_text, photo_url)
+            return await self.send_new_post(
+                token, chat_id, content, url, text, buy_url, buy_text,
+                photo_url, item_id
+            )
         except Exception as e:
             logger.error(f"Error sending new post: {str(e)}", exc_info=True)
+            return False
 
     async def check_telegram_queue(self, context: ContextTypes.DEFAULT_TYPE):
         try:
@@ -339,6 +359,7 @@ class LeRobot:
                     buy_text = queue_item[4] if len(queue_item) > 4 else None
                     query_id = queue_item[5] if len(queue_item) > 5 else None
                     photo_url = queue_item[6] if len(queue_item) > 6 else None
+                    item_id = queue_item[7] if len(queue_item) > 7 else None
 
                     # Resolve which bots/chats should receive this item
                     enabled, targets = db.get_query_telegram_targets(query_id)
@@ -355,9 +376,23 @@ class LeRobot:
 
                     # Send to every selected bot/chat
                     for bot_id, bot_name, token, chat_id in targets:
-                        await self.send_new_post(
-                            token, chat_id, content, url, text, buy_url, buy_text, photo_url
+                        if not db.claim_telegram_delivery(item_id, chat_id):
+                            logger.info(
+                                "Skipping duplicate Telegram delivery for item %s to chat %s",
+                                item_id,
+                                chat_id,
+                            )
+                            continue
+                        sent = await self.send_new_post(
+                            token, chat_id, content, url, text, buy_url, buy_text,
+                            photo_url, item_id
                         )
+                        if sent:
+                            logger.info(
+                                "Telegram notification sent for item %s to chat %s",
+                                item_id,
+                                chat_id,
+                            )
                 else:
                     await asyncio.sleep(0.1)
                     pass

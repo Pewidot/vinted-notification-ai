@@ -925,6 +925,36 @@ def get_query_telegram_targets(query_id):
             conn.close()
 
 
+def claim_telegram_delivery(item_id, chat_id):
+    """
+    Atomically claim one item for one Telegram destination.
+
+    Returns True only to the first caller. The claim is intentionally made
+    before the network request: if Telegram times out after accepting a post,
+    retrying would otherwise create the exact duplicate this guard prevents.
+    """
+    if item_id is None or chat_id is None:
+        return True
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR IGNORE INTO telegram_deliveries (item, chat_id) VALUES (?, ?)",
+            (str(item_id), str(chat_id)),
+        )
+        claimed = cursor.rowcount == 1
+        conn.commit()
+        return claimed
+    except Exception:
+        print_exc()
+        # Fail closed: a database problem must not turn into a Telegram flood.
+        return False
+    finally:
+        if conn:
+            conn.close()
+
+
 def add_to_allowlist(country):
     conn = None
     try:

@@ -888,7 +888,18 @@ def clear_item_queue(items_queue, new_items_queue):
                     published=_fmt_ts(item.raw_timestamp),
                     url=getattr(item, "url", ""),
                 )
-                new_items_queue.put((content, item.url, button_text, None, None, query_id, item.photo))
+                new_items_queue.put(
+                    (
+                        content,
+                        item.url,
+                        button_text,
+                        None,
+                        None,
+                        query_id,
+                        item.photo,
+                        item.id,
+                    )
+                )
                 # new_items_queue.put((content, item.url, button_text, item.buy_url, "Open buy page", query_id, item.photo))
                 # Add the item to the db
                 db.add_item_to_db(

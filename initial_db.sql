@@ -65,6 +65,16 @@ CREATE TABLE IF NOT EXISTS query_telegram_bots
     FOREIGN KEY (bot_id) REFERENCES telegram_bots (id)
 );
 
+-- Exact-once guard per Telegram destination. This is intentionally separate
+-- from items: a listing can be stored while Telegram is disabled.
+CREATE TABLE IF NOT EXISTS telegram_deliveries
+(
+    item         TEXT,
+    chat_id      TEXT,
+    delivered_at NUMERIC DEFAULT (strftime('%s', 'now')),
+    PRIMARY KEY (item, chat_id)
+);
+
 -- Parameters table
 CREATE TABLE IF NOT EXISTS parameters
 (
@@ -87,7 +97,7 @@ VALUES ('telegram_enabled', 'False'),
        ('rss_max_items', '100'),
        ('rss_process_running', 'False'),
 
-       ('version', '1.0.7.2'),
+       ('version', '1.0.7.3'),
        ('github_url', 'https://github.com/Fuyucch1/Vinted-Notifications'),
 
        ('items_per_query', '20'),
