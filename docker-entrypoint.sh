@@ -1,8 +1,8 @@
 #!/usr/bin/env sh
 set -eu
 
-APP_UID="${APP_UID:-10001}"
-APP_GID="${APP_GID:-10001}"
+APP_UID="${APP_UID:-1000}"
+APP_GID="${APP_GID:-1000}"
 APP_USER="${APP_USER:-appuser}"
 
 mkdir -p /app/data /app/logs

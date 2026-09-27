@@ -566,9 +566,11 @@ def _scrape_platform_queries(platform, queries, items_per_query, queue):
             if (
                 platform == "vinted"
                 and not all_items
-                and db.get_last_timestamp(query[0]) is None
+                and not db.is_vinted_id_baselined(query[0])
             ):
-                db.update_last_timestamp(query[0], int(time.time()))
+                if db.get_last_timestamp(query[0]) is None:
+                    db.update_last_timestamp(query[0], int(time.time()))
+                db.mark_vinted_id_baselined(query[0])
 
             # The page answered, so the query is no longer blind - stamp before
             # filtering, otherwise the window would keep growing on a quiet query.
@@ -697,14 +699,16 @@ def clear_item_queue(items_queue, new_items_queue):
         data, query_id = items_queue.get()
         banwords_str = db.get_parameter("banwords")
 
-        # Timestamp-less Vinted results use an observation timestamp. On the
-        # first successful run, prime the ID store silently so adding a query
-        # does not announce the entire first page.
+        # Timestamp-less Vinted results use an observation timestamp. Prime a
+        # persistent per-query ID baseline on the first successful run under
+        # this API. This must not depend on last_item: queries created by the
+        # old timestamp API already have a watermark and would otherwise dump
+        # their entire first page into Telegram after an upgrade.
         last_query_timestamp = db.get_last_timestamp(query_id)
         timestamp_less = any(
             getattr(item, "has_real_timestamp", True) is False for item in data
         )
-        if last_query_timestamp is None and timestamp_less:
+        if timestamp_less and not db.is_vinted_id_baselined(query_id):
             logger.info(
                 f"First run for query {query_id}: recording {len(data)} Vinted "
                 "item(s) without notifications"
@@ -725,6 +729,7 @@ def clear_item_queue(items_queue, new_items_queue):
                     )
             if latest_seen is not None:
                 db.update_last_timestamp(query_id, latest_seen)
+            db.mark_vinted_id_baselined(query_id)
             debug_log.log(
                 query_id, "prime",
                 f"Recorded {len(data)} existing Vinted listing(s) silently",

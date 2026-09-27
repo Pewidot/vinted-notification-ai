@@ -20,7 +20,8 @@ CREATE TABLE IF NOT EXISTS queries
     active INTEGER DEFAULT 1,
     refresh_delay INTEGER,
     last_scraped NUMERIC DEFAULT 0,
-    last_success NUMERIC DEFAULT 0
+    last_success NUMERIC DEFAULT 0,
+    vinted_id_baselined INTEGER DEFAULT 0
 );
 
 -- Items table
@@ -86,7 +87,7 @@ VALUES ('telegram_enabled', 'False'),
        ('rss_max_items', '100'),
        ('rss_process_running', 'False'),
 
-       ('version', '1.0.7.1'),
+       ('version', '1.0.7.2'),
        ('github_url', 'https://github.com/Fuyucch1/Vinted-Notifications'),
 
        ('items_per_query', '20'),

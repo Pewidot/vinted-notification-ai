@@ -1,9 +1,15 @@
 FROM python:3.11-slim
 
 # --- build args / defaults for the runtime user ---
-ARG APP_UID=10001
-ARG APP_GID=10001
+ARG APP_UID=1000
+ARG APP_GID=1000
 ARG APP_USER=appuser
+
+# Keep bind-mounted data writable by the local workspace owner. The entrypoint
+# consumes these values when it fixes directory ownership and drops privileges.
+ENV APP_UID=${APP_UID} \
+    APP_GID=${APP_GID} \
+    APP_USER=${APP_USER}
 
 WORKDIR /app
 

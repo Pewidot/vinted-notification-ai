@@ -105,12 +105,49 @@ def add_item_to_db(id, title, query_id, price, timestamp, photo_url, currency="E
         cursor = conn.cursor()
         # Insert into db the id and the query_id related to the item
         cursor.execute(
-            "INSERT INTO items (item, title, price, currency, timestamp, photo_url, query_id, url) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO items (item, title, price, currency, timestamp, photo_url, query_id, url) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (id, title, price, currency, timestamp, photo_url, query_id, url),
         )
         # Update the last item for the query
         cursor.execute(
             "UPDATE queries SET last_item=? WHERE id=?", (timestamp, query_id)
+        )
+        conn.commit()
+    except Exception:
+        print_exc()
+    finally:
+        if conn:
+            conn.close()
+
+
+def is_vinted_id_baselined(query_id):
+    """Whether this query has primed the timestamp-free Vinted ID catalogue."""
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT COALESCE(vinted_id_baselined, 0) FROM queries WHERE id=?",
+            (query_id,),
+        )
+        result = cursor.fetchone()
+        return bool(result and result[0])
+    except Exception:
+        print_exc()
+        return False
+    finally:
+        if conn:
+            conn.close()
+
+
+def mark_vinted_id_baselined(query_id):
+    """Persist completion of a query's silent Vinted ID baseline."""
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE queries SET vinted_id_baselined=1 WHERE id=?", (query_id,)
         )
         conn.commit()
     except Exception:

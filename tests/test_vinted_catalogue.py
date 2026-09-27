@@ -138,6 +138,7 @@ class VintedCatalogueTests(unittest.TestCase):
 
         self.assertFalse(core.can_buy_from_delivery_market(item))
 
+    @patch("core.db.is_vinted_id_baselined", return_value=True)
     @patch("core.debug_log.log")
     @patch("core.can_buy_from_delivery_market")
     @patch("core.db.get_allowlist", return_value=0)
@@ -156,6 +157,7 @@ class VintedCatalogueTests(unittest.TestCase):
         _get_allowlist,
         delivery_check,
         debug_log,
+        _is_baselined,
     ):
         item = self.make_item()
         item.currency = "USD"
@@ -211,13 +213,15 @@ class VintedCatalogueTests(unittest.TestCase):
                 self.assertEqual(db.get_total_items_count(), 2)
                 self.assertEqual(db.get_last_found_item()[0], 3)
 
+    @patch("core.db.mark_vinted_id_baselined")
+    @patch("core.db.is_vinted_id_baselined", return_value=False)
     @patch("core.debug_log.log")
     @patch("core.db.update_last_timestamp")
     @patch("core.db.add_item_to_db")
     @patch("core.db.is_item_in_db_by_id", return_value=False)
-    @patch("core.db.get_last_timestamp", return_value=None)
+    @patch("core.db.get_last_timestamp", return_value=1700000000)
     @patch("core.db.get_parameter", return_value="")
-    def test_first_timestamp_less_run_is_recorded_silently(
+    def test_old_watermark_still_gets_silent_id_baseline(
         self,
         _get_parameter,
         _get_last_timestamp,
@@ -225,6 +229,8 @@ class VintedCatalogueTests(unittest.TestCase):
         add_item,
         update_watermark,
         _debug_log,
+        _is_baselined,
+        mark_baselined,
     ):
         incoming = Queue()
         notifications = Queue()
@@ -235,7 +241,10 @@ class VintedCatalogueTests(unittest.TestCase):
         self.assertTrue(notifications.empty())
         add_item.assert_called_once()
         update_watermark.assert_called_once()
+        mark_baselined.assert_called_once_with(42)
 
+    @patch("core.db.mark_vinted_id_baselined")
+    @patch("core.db.is_vinted_id_baselined", return_value=False)
     @patch("core.debug_log.log")
     @patch("core.db.mark_query_success")
     @patch("core.db.update_last_timestamp")
@@ -250,6 +259,8 @@ class VintedCatalogueTests(unittest.TestCase):
         update_watermark,
         _mark_success,
         _debug_log,
+        _is_baselined,
+        mark_baselined,
     ):
         vinted = MagicMock()
         vinted.items.search.return_value = []
@@ -261,6 +272,7 @@ class VintedCatalogueTests(unittest.TestCase):
         core._scrape_platform_queries("vinted", [query], 20, results)
 
         update_watermark.assert_called_once_with(42, ANY)
+        mark_baselined.assert_called_once_with(42)
         self.assertEqual(results.get_nowait(), ([], 42))
 
 
