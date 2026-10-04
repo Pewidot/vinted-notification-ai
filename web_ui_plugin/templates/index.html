@@ -89,33 +89,47 @@
 
 <!-- Proxy Statistics Section -->
 <div class="row mb-4">
-    <div class="col-md-6">
+    <div class="col-md-3">
         <div class="card h-100 border-0 shadow-sm">
             <div class="card-body text-center">
                 <div class="d-flex align-items-center justify-content-center mb-3">
                     <i class="bi bi-check-circle text-success" style="font-size: 2rem;"></i>
                 </div>
-                <h5 class="card-title">Active Proxies</h5>
-                <h2 class="display-4 fw-bold text-success">{{ proxy_stats.active_proxies }}</h2>
-                <p class="card-text text-muted">
-                    {% if proxy_stats.validation_enabled %}
-                    Validated working proxies
-                    {% else %}
-                    Loaded proxies (unvalidated)
-                    {% endif %}
-                </p>
+                <h5 class="card-title">Used / Working</h5>
+                <h2 class="display-4 fw-bold text-success">{{ proxy_stats.working_proxies }}</h2>
+                <p class="card-text text-muted">Last real search succeeded</p>
             </div>
         </div>
     </div>
-    <div class="col-md-6">
+    <div class="col-md-3">
         <div class="card h-100 border-0 shadow-sm">
             <div class="card-body text-center">
                 <div class="d-flex align-items-center justify-content-center mb-3">
                     <i class="bi bi-x-circle text-danger" style="font-size: 2rem;"></i>
                 </div>
-                <h5 class="card-title">Blacklisted Proxies</h5>
-                <h2 class="display-4 fw-bold text-danger">{{ proxy_stats.blacklisted_proxies }}</h2>
-                <p class="card-text text-muted">Temporarily blocked (1h auto-expire)</p>
+                <h5 class="card-title">Query Blacklisted</h5>
+                <h2 class="display-4 fw-bold text-danger">{{ proxy_stats.query_blacklisted_proxies }}</h2>
+                <p class="card-text text-muted">Failed during a real search</p>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card h-100 border-0 shadow-sm">
+            <div class="card-body text-center">
+                <i class="bi bi-shield-x text-warning" style="font-size: 2rem;"></i>
+                <h5 class="card-title mt-3">Scan Blacklisted</h5>
+                <h2 class="display-4 fw-bold text-warning">{{ proxy_stats.scan_blacklisted_proxies }}</h2>
+                <p class="card-text text-muted">Failed the latest manual scan</p>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card h-100 border-0 shadow-sm">
+            <div class="card-body text-center">
+                <i class="bi bi-hdd-network text-info" style="font-size: 2rem;"></i>
+                <h5 class="card-title mt-3">All Proxies</h5>
+                <h2 class="display-4 fw-bold text-info">{{ proxy_stats.total_proxies }}</h2>
+                <p class="card-text text-muted">{{ proxy_stats.available_proxies }} currently available</p>
             </div>
         </div>
     </div>
@@ -136,9 +150,11 @@
                         <thead>
                         <tr>
                             <th>Platform</th>
-                            <th class="text-center">Active</th>
-                            <th class="text-center">Blacklisted</th>
-                            <th class="text-center">Total</th>
+                            <th class="text-center">Available</th>
+                            <th class="text-center">Used / Working</th>
+                            <th class="text-center">Query blacklist</th>
+                            <th class="text-center">Scan blacklist</th>
+                            <th class="text-center">All</th>
                         </tr>
                         </thead>
                         <tbody>
@@ -146,8 +162,10 @@
                         {% set s = proxy_stats.per_platform[plat] %}
                         <tr>
                             <td><span class="badge {{ badge }}">{{ label }}</span></td>
-                            <td class="text-center text-success fw-bold">{{ s.active_proxies }}</td>
-                            <td class="text-center text-danger">{{ s.blacklisted_proxies }}</td>
+                            <td class="text-center text-success fw-bold">{{ s.available_proxies }}</td>
+                            <td class="text-center">{{ s.working_proxies }}</td>
+                            <td class="text-center text-danger">{{ s.query_blacklisted_proxies }}</td>
+                            <td class="text-center text-warning">{{ s.scan_blacklisted_proxies }}</td>
                             <td class="text-center">{{ s.total_proxies }}</td>
                         </tr>
                         {% endfor %}
@@ -159,6 +177,50 @@
     </div>
 </div>
 {% endif %}
+
+<div class="row mb-4">
+    <div class="col-md-8">
+        <div class="card h-100">
+            <div class="card-header"><i class="bi bi-cpu me-2 text-info"></i>Search Workers</div>
+            <div class="table-responsive">
+                <table class="table table-sm table-hover mb-0 align-middle">
+                    <thead><tr><th>Search</th><th>Platform</th><th>Health</th><th>Runs</th><th>Last error</th></tr></thead>
+                    <tbody>
+                    {% for worker in worker_states %}
+                    <tr>
+                        <td>#{{ worker.query_id }} {{ worker.name }}</td>
+                        <td>{{ worker.platform }}</td>
+                        <td>
+                            {% set color = 'success' if worker.state == 'healthy' else ('danger' if worker.state in ['error', 'stuck'] else 'primary') %}
+                            <span class="badge bg-{{ color }}">{{ worker.state }}</span>
+                            {% if worker.state == 'stuck' %}<small>{{ worker.age }}s</small>{% endif %}
+                        </td>
+                        <td>{{ worker.successes }}/{{ worker.runs }}</td>
+                        <td class="small text-danger">{{ worker.error or '—' }}</td>
+                    </tr>
+                    {% else %}<tr><td colspan="5" class="text-center text-muted">Workers start with the next due search.</td></tr>{% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card h-100">
+            <div class="card-header"><i class="bi bi-router me-2 text-info"></i>Proxy Scan Workers</div>
+            <div class="card-body">
+                {% for scan in proxy_scan_states %}
+                <div class="d-flex justify-content-between border-bottom py-2">
+                    <span>{{ scan.platform|title }}</span>
+                    <span>
+                        <span class="badge bg-{{ 'primary' if scan.state == 'running' else ('success' if scan.state == 'healthy' else ('danger' if scan.state == 'error' else 'secondary')) }}">{{ scan.state }}</span>
+                        {% if scan.total %}<small>{{ scan.checked }}/{{ scan.total }} · {{ scan.working }} valid</small>{% endif %}
+                    </span>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+</div>
 
 <div class="row mb-4">
     <div class="col-md-12">

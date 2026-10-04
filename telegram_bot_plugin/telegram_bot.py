@@ -4,7 +4,7 @@ from telegram.error import BadRequest, RetryAfter
 import db
 import core
 import asyncio
-from logger import get_logger
+from logger import get_logger, set_log_context
 
 # Get logger for this module
 logger = get_logger(__name__)
@@ -360,6 +360,11 @@ class LeRobot:
                     query_id = queue_item[5] if len(queue_item) > 5 else None
                     photo_url = queue_item[6] if len(queue_item) > 6 else None
                     item_id = queue_item[7] if len(queue_item) > 7 else None
+                    set_log_context(
+                        platform=db.get_query_platform(query_id),
+                        query_id=query_id,
+                        worker="telegram",
+                    )
 
                     # Resolve which bots/chats should receive this item
                     enabled, targets = db.get_query_telegram_targets(query_id)

@@ -236,6 +236,10 @@ if __name__ == "__main__":
         else:
             break
 
+    db.reset_stale_worker_states()
+    import proxies
+    proxies.bootstrap_durable_proxy_state()
+
     # Plugin checker
     plugin_checker()
 

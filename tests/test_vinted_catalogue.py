@@ -278,7 +278,8 @@ class VintedCatalogueTests(unittest.TestCase):
                  "rare", None, 1, "vinted", 1, 60, 0, 0)
         results = Queue()
 
-        core._scrape_platform_queries("vinted", [query], 20, results)
+        with patch("core.db.set_query_worker_state"):
+            core._scrape_platform_queries("vinted", [query], 20, results)
 
         update_watermark.assert_called_once_with(42, ANY)
         mark_baselined.assert_called_once_with(42)

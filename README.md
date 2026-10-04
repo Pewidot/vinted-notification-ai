@@ -203,8 +203,23 @@ at [http://localhost:8080](http://localhost:8080).
 
 ### Proxy Support
 
-The application supports using proxies to avoid rate limits. Those are configured in the configuration tab of the Web
-UI.
+The application keeps an independent proxy pool for Vinted, Kleinanzeigen and
+eBay. Each pool exposes three operational lists in the configuration UI:
+
+- **All**: every proxy known for that platform.
+- **Used / Working**: proxies whose most recent real search returned a valid page.
+- **Blacklisted**: query failures and manual-scan failures (shown separately on
+  the dashboard).
+
+The first two request attempts use the available pool. Attempt three prefers
+Used / Working proxies. Blacklists do not expire automatically; only a complete
+manual rescan can restore a proxy after validating it. Rescans use one
+background worker per platform and never pause search workers. Saving unrelated
+settings does not trigger a rescan.
+
+Every active search also has its own worker. A slow or stuck search therefore
+blocks only its own next run. Worker health and proxy-scan progress are visible
+on the dashboard, and the main log can be filtered by platform and search.
 
 ### Custom Notification Format
 

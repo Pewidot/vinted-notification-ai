@@ -30,7 +30,7 @@ logger = get_logger(__name__)
 IMPERSONATE_PROFILES = ["chrome124", "chrome120", "chrome110", "chrome131", "chrome"]
 
 # How many different eBay proxies to try before giving up on a fetch
-MAX_PROXY_ATTEMPTS = 6
+MAX_PROXY_ATTEMPTS = 3
 # Cap the per-attempt timeout for eBay fetches: a proxy slower than this is not
 # worth waiting for, and a lower cap means dead proxies fail fast during rotation.
 # (Session warming downloads the homepage + a ~1.5MB search page, so allow a bit.)
@@ -360,7 +360,7 @@ def _fetch(url):
 
     # Try up to MAX_PROXY_ATTEMPTS different eBay proxies
     for attempt in range(1, MAX_PROXY_ATTEMPTS + 1):
-        proxy_dict, current_proxy = proxies.get_proxy_dict("ebay")
+        proxy_dict, current_proxy = proxies.get_proxy_dict("ebay", attempt=attempt)
 
         if current_proxy is None:
             if proxies_configured:
@@ -377,6 +377,7 @@ def _fetch(url):
 
         html = _fetch_once(url, proxy_dict, timeout)
         if html is not None:
+            proxies.mark_proxy_working(current_proxy, "ebay")
             return html
 
         if current_proxy:

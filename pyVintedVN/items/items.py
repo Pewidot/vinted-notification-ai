@@ -1,7 +1,6 @@
 from pyVintedVN.items.item import Item
-from pyVintedVN.requester import requester
+from pyVintedVN.requester import requester, HTTPError
 from urllib.parse import urlparse, parse_qsl
-from curl_cffi.requests.exceptions import HTTPError
 from typing import List, Dict, Optional
 from pyVintedVN.settings import Urls
 
@@ -17,6 +16,9 @@ class Items:
         >>> items = Items()
         >>> results = items.search("https://www.vinted.fr/catalog?search_text=shoes")
     """
+
+    def __init__(self, requester_instance=None):
+        self.requester = requester_instance or requester
 
     def search(
         self,
@@ -54,15 +56,15 @@ class Items:
             # requester is a shared singleton, and a concurrent scrape would
             # otherwise overwrite the locale between these two calls and send
             # the request with the wrong Host header.
-            with requester.lock:
-                requester.set_locale(locale)
+            with self.requester.lock:
+                self.requester.set_locale(locale)
                 # Build this only after selecting the locale; the requester is
                 # shared and may still point at the previous query's country.
                 api_url = (
-                    f"https://{requester.get_api_host()}"
+                    f"https://{self.requester.get_api_host()}"
                     f"{Urls.VINTED_API_URL}/{Urls.VINTED_PRODUCTS_ENDPOINT}"
                 )
-                response = requester.get(url=api_url, params=params)
+                response = self.requester.get(url=api_url, params=params)
             response.raise_for_status()
 
             # Parse the response

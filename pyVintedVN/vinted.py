@@ -16,7 +16,7 @@ class Vinted:
         >>> items = vinted.items.search("https://www.vinted.fr/catalog?search_text=shoes")
     """
 
-    def __init__(self):
+    def __init__(self, requester_instance=None):
         """
         Initialize the Vinted class with optional proxy settings.
 
@@ -24,4 +24,4 @@ class Vinted:
         """
 
         # Initialize Items instance for searching Vinted listings
-        self.items = Items()
+        self.items = Items(requester_instance=requester_instance)

@@ -37,6 +37,14 @@
 <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
     <h1 class="h2">Logs</h1>
     <div class="btn-toolbar mb-2 mb-md-0">
+        <select class="form-select form-select-sm me-2" id="platformFilter" style="width:auto">
+            <option value="all">All platforms</option>
+            {% for platform in platforms %}<option value="{{ platform }}">{{ platform|title }}</option>{% endfor %}
+        </select>
+        <select class="form-select form-select-sm me-2" id="queryFilter" style="max-width:260px">
+            <option value="all">All searches</option>
+            {% for query in queries %}<option value="{{ query[0] }}">#{{ query[0] }} {{ query[3] or query[1] }}</option>{% endfor %}
+        </select>
         <div class="btn-group me-2">
             <button type="button" class="btn btn-sm btn-outline-secondary" id="refreshBtn">
                 <i class="bi bi-arrow-clockwise me-1"></i> Refresh Now
@@ -83,12 +91,14 @@
                             <th style="width: 180px;">Timestamp</th>
                             <th style="width: 100px;">Level</th>
                             <th style="width: 150px;">Module</th>
+                            <th style="width: 110px;">Platform</th>
+                            <th style="width: 80px;">Search</th>
                             <th>Message</th>
                         </tr>
                         </thead>
                         <tbody id="logEntries">
                         <tr>
-                            <td colspan="4" class="text-center py-4">Loading logs...</td>
+                            <td colspan="6" class="text-center py-4">Loading logs...</td>
                         </tr>
                         </tbody>
                     </table>
@@ -118,15 +128,19 @@
         const toggleAutoRefreshBtn = document.getElementById('toggleAutoRefreshBtn');
         const loadMoreBtn = document.getElementById('loadMoreBtn');
         const logLevelFilters = document.querySelectorAll('.log-level-filter');
+        const platformFilter = document.getElementById('platformFilter');
+        const queryFilter = document.getElementById('queryFilter');
 
         let autoRefreshInterval;
         let currentLogLevel = 'all';
+        let currentPlatform = 'all';
+        let currentQuery = 'all';
         let currentOffset = 0;
         const limit = 100;
 
         // Function to fetch logs
         function fetchLogs(offset = 0, append = false) {
-            fetch(`/api/logs?offset=${offset}&limit=${limit}&level=${currentLogLevel}`)
+            fetch(`/api/logs?offset=${offset}&limit=${limit}&level=${currentLogLevel}&platform=${encodeURIComponent(currentPlatform)}&query=${encodeURIComponent(currentQuery)}`)
                 .then(response => response.json())
                 .then(data => {
                     if (!append) {
@@ -136,7 +150,7 @@
 
                     if (data.logs.length === 0) {
                         if (!append) {
-                            logEntries.innerHTML = '<tr><td colspan="4" class="text-center py-4">No log entries found</td></tr>';
+                            logEntries.innerHTML = '<tr><td colspan="6" class="text-center py-4">No log entries found</td></tr>';
                         }
                         loadMoreBtn.disabled = true;
                     } else {
@@ -156,6 +170,8 @@
                                 <td>${log.timestamp}</td>
                                 <td><span class="badge log-${log.level.toLowerCase()}">${log.level}</span></td>
                                 <td>${log.module}</td>
+                                <td>${log.platform || '—'}</td>
+                                <td>${log.query_id ? '#' + log.query_id : '—'}</td>
                                 <td class="log-entry">${log.message}</td>
                             `;
                             logEntries.appendChild(row);
@@ -168,7 +184,7 @@
                 })
                 .catch(error => {
                     console.error('Error fetching logs:', error);
-                    logEntries.innerHTML = '<tr><td colspan="4" class="text-center py-4 text-danger">Error loading logs</td></tr>';
+                    logEntries.innerHTML = '<tr><td colspan="6" class="text-center py-4 text-danger">Error loading logs</td></tr>';
                 });
         }
 
@@ -221,6 +237,15 @@
                 currentLogLevel = filter.getAttribute('data-level');
                 fetchLogs();
             });
+        });
+
+        platformFilter.addEventListener('change', () => {
+            currentPlatform = platformFilter.value;
+            fetchLogs();
+        });
+        queryFilter.addEventListener('change', () => {
+            currentQuery = queryFilter.value;
+            fetchLogs();
         });
     });
 </script>

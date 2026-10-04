@@ -182,12 +182,18 @@
                                             <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
                                                 <button type="submit" form="proxyResetForm"
                                                         class="btn btn-outline-warning btn-sm">
-                                                    <i class="bi bi-arrow-repeat me-1"></i> Reset &amp; re-check all
-                                                    proxies
+                                                    <i class="bi bi-arrow-repeat me-1"></i> Complete rescan: all
                                                 </button>
-                                                <small class="form-text text-muted mb-0">Wipes all proxy pools,
-                                                    blacklists and counts, then re-validates all three platforms in
-                                                    parallel.</small>
+                                                {% for plat, label in [('vinted', 'Vinted'), ('kleinanzeigen', 'Kleinanzeigen'), ('ebay', 'eBay')] %}
+                                                <button type="submit" form="proxyResetForm" name="platform"
+                                                        value="{{ plat }}" class="btn btn-outline-secondary btn-sm">
+                                                    Scan {{ label }}
+                                                </button>
+                                                {% endfor %}
+                                                <small class="form-text text-muted mb-0">Manual only. Each platform
+                                                    scans in its own background worker while searches continue.
+                                                    Blacklisted proxies are restored only when this scan proves them
+                                                    valid.</small>
                                             </div>
                                             <p class="text-muted mb-3">
                                                 Each platform uses its own proxy list, validated against that
@@ -224,6 +230,21 @@
                                                                name="proxy_list_link_{{ plat }}"
                                                                value="{{ params['proxy_list_link_' + plat] }}">
                                                     </div>
+                                                    <div class="row g-2 mb-3">
+                                                        <div class="col-md-4">
+                                                            <label class="form-label">All Proxies ({{ proxy_lists[plat]['all']|length }})</label>
+                                                            <textarea class="form-control font-monospace" rows="6" readonly>{{ proxy_lists[plat]['all']|join('\n') }}</textarea>
+                                                        </div>
+                                                        <div class="col-md-4">
+                                                            <label class="form-label text-success">Used / Working ({{ proxy_lists[plat]['working']|length }})</label>
+                                                            <textarea class="form-control font-monospace" rows="6" readonly>{{ proxy_lists[plat]['working']|join('\n') }}</textarea>
+                                                        </div>
+                                                        <div class="col-md-4">
+                                                            <label class="form-label text-danger">Blacklisted ({{ proxy_lists[plat]['blacklisted']|length }})</label>
+                                                            <textarea class="form-control font-monospace" rows="6" readonly>{{ proxy_lists[plat]['blacklisted']|join('\n') }}</textarea>
+                                                            <small class="text-muted">Query: {{ proxy_lists[plat]['query_blacklisted']|length }} · Scan: {{ proxy_lists[plat]['scan_blacklisted']|length }}</small>
+                                                        </div>
+                                                    </div>
                                                 </div>
                                                 {% endfor %}
                                             </div>
@@ -252,9 +273,9 @@
                                                 <input type="number" class="form-control" id="proxy_blacklist_duration"
                                                        name="proxy_blacklist_duration"
                                                        value="{{ params.proxy_blacklist_duration or 60 }}" min="1" max="10080">
-                                                <small class="form-text text-muted">How long a failing proxy is skipped before
-                                                    it is retried (default: 60 min). Lower it for small paid pools,
-                                                    raise it for large free lists.</small>
+                                                <small class="form-text text-muted">Legacy setting. Query and scan
+                                                    blacklists are now durable until a complete manual rescan proves
+                                                    the proxy valid.</small>
                                             </div>
                                         </div>
                                     </div>

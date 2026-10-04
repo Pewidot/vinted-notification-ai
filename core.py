@@ -1,15 +1,20 @@
 import re
 import time
+import threading
 
 import db
 import debug_log
 import requests
 from pyVintedVN import Vinted, requester
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
-from logger import get_logger
+from logger import get_logger, log_context, set_log_context
+from pyVintedVN.requester import Requester
 
 # Get logger for this module
 logger = get_logger(__name__)
+
+_QUERY_WORKERS = {}
+_QUERY_WORKERS_LOCK = threading.Lock()
 
 
 def _vinted_delivery_host():
@@ -515,35 +520,22 @@ def get_user_country(profile_id):
     return user_country
 
 
-def _scrape_platform_queries(platform, queries, items_per_query, queue):
-    """
-    Scrape all queries of a single platform sequentially and put results on the
-    queue. Runs in its own thread so the three platforms scrape in parallel.
-
-    Sequential within a platform on purpose: the Vinted requester is a shared
-    singleton and each platform draws from its own proxy pool, so we don't want
-    concurrent requests within the same platform.
-
-    Args:
-        platform (str): 'vinted', 'kleinanzeigen' or 'ebay'
-        queries (list): Query rows for this platform
-        items_per_query (int): Number of items to request per query
-        queue (Queue): Queue to put (data, query_id) results on
-    """
-    # Create a Vinted instance only for the vinted worker (uses singleton requester)
-    vinted = Vinted() if platform == "vinted" else None
-
-    for query in queries:
+def _scrape_query_worker(platform, query, items_per_query, queue):
+    """Run one search in its own isolated worker thread."""
+    query_id = query[0]
+    worker_id = threading.current_thread().name
+    with log_context(platform=platform, query_id=query_id, worker=worker_id):
+        db.set_query_worker_state(query_id, platform, "running", worker_id)
         # Stamp before scraping: a query that keeps failing must not be retried
         # on every single tick, it waits for its own interval like the others.
-        db.mark_query_scraped(query[0])
+        db.mark_query_scraped(query_id)
         # Sized from the last successful scrape, so a query that was blocked or
         # blocked-out for a while still recognises what appeared meanwhile.
         last_success = query[10] if len(query) > 10 and query[10] else 0
         window = new_item_window_minutes(last_success)
         try:
-            logger.info(f"[{platform.upper()}] Scraping query {query[0]}: {query[1]}")
-            debug_log.log(query[0], "request", f"Requesting {platform}",
+            logger.info(f"Scraping query: {query[1]}")
+            debug_log.log(query_id, "request", f"Requesting {platform}",
                           url=query[1], items_per_query=items_per_query,
                           new_item_window=f"{window:.0f} min",
                           last_success=_fmt_ts(last_success) or "never")
@@ -558,7 +550,11 @@ def _scrape_platform_queries(platform, queries, items_per_query, queue):
 
                 all_items = ebay_web.search(query[1], nbr_items=items_per_query)
             else:
-                all_items = vinted.items.search(query[1], nbr_items=items_per_query)
+                # A requester per query is essential: the legacy process-wide
+                # singleton serialised every Vinted search behind one lock.
+                all_items = Vinted(Requester()).items.search(
+                    query[1], nbr_items=items_per_query
+                )
 
             # An empty first page is still a successful baseline. Without this,
             # the first item that appears later would be mistaken for the
@@ -566,25 +562,25 @@ def _scrape_platform_queries(platform, queries, items_per_query, queue):
             if (
                 platform == "vinted"
                 and not all_items
-                and not db.is_vinted_id_baselined(query[0])
+                and not db.is_vinted_id_baselined(query_id)
             ):
-                if db.get_last_timestamp(query[0]) is None:
-                    db.update_last_timestamp(query[0], int(time.time()))
-                db.mark_vinted_id_baselined(query[0])
+                if db.get_last_timestamp(query_id) is None:
+                    db.update_last_timestamp(query_id, int(time.time()))
+                db.mark_vinted_id_baselined(query_id)
 
             # The page answered, so the query is no longer blind - stamp before
             # filtering, otherwise the window would keep growing on a quiet query.
-            db.mark_query_success(query[0])
+            db.mark_query_success(query_id)
 
             # Filter to only include new items
             data = [item for item in all_items if item.is_new_item(minutes=window)]
 
             logger.info(
-                f"[{platform.upper()}] Found {len(data)} new item(s) "
-                f"(of {len(all_items)} scraped) for query {query[0]}, "
+                f"Found {len(data)} new item(s) "
+                f"(of {len(all_items)} scraped), "
                 f"window {window:.0f} min"
             )
-            debug_log.log(query[0], "result",
+            debug_log.log(query_id, "result",
                           f"{len(all_items)} listing(s) returned, {len(data)} count as new",
                           returned=len(all_items), new=len(data),
                           new_item_window=f"{window:.0f} min")
@@ -593,7 +589,7 @@ def _scrape_platform_queries(platform, queries, items_per_query, queue):
             for it in all_items:
                 is_new = it.is_new_item(minutes=window)
                 debug_log.log(
-                    query[0],
+                    query_id,
                     "listing" if is_new else "listing-old",
                     ("new" if is_new else f"published more than {window:.0f} min ago")
                     + f": {getattr(it, 'title', '')[:70]}",
@@ -602,23 +598,36 @@ def _scrape_platform_queries(platform, queries, items_per_query, queue):
                     published=_fmt_ts(getattr(it, "raw_timestamp", 0)),
                     url=getattr(it, "url", ""),
                 )
-            queue.put((data, query[0]))
+            queue.put((data, query_id))
+            db.set_query_worker_state(query_id, platform, "healthy", worker_id)
 
         except Exception as e:
-            logger.error(f"[{platform.upper()}] Error processing query {query[0]}: {e}")
-            debug_log.log(query[0], "error", f"Scrape failed: {str(e)[:200]}")
+            logger.error(f"Error processing query: {e}")
+            debug_log.log(query_id, "error", f"Scrape failed: {str(e)[:200]}")
             # Put empty result on error
-            queue.put(([], query[0]))
+            queue.put(([], query_id))
+            db.set_query_worker_state(
+                query_id, platform, "error", worker_id, error=e
+            )
+        finally:
+            with _QUERY_WORKERS_LOCK:
+                current = _QUERY_WORKERS.get(query_id)
+                if current is threading.current_thread():
+                    _QUERY_WORKERS.pop(query_id, None)
+
+
+def _scrape_platform_queries(platform, queries, items_per_query, queue):
+    """Compatibility helper; production dispatches each query independently."""
+    for query in queries:
+        _scrape_query_worker(platform, query, items_per_query, queue)
 
 
 def process_items(queue):
     """
     Scrape all active queries and put their results on the queue.
 
-    Queries are grouped by platform (vinted / kleinanzeigen / ebay) and each
-    platform is scraped in its own thread, so a slow platform (e.g. eBay with
-    session warming and proxy rotation) does not hold up the others. Within a
-    platform, queries run sequentially.
+    Every due query receives one independent worker. The scheduler never joins
+    those workers, so a hung search can only block its own next run.
 
     Args:
         queue (Queue): The queue to put the (items, query_id) results on.
@@ -626,9 +635,6 @@ def process_items(queue):
     Returns:
         None
     """
-    import threading
-    from collections import defaultdict
-
     all_queries = db.get_queries()
 
     # Get the number of items per query from the database
@@ -643,8 +649,6 @@ def process_items(queue):
     except (TypeError, ValueError):
         default_delay = 60
 
-    # Group active, due queries by platform
-    queries_by_platform = defaultdict(list)
     for query in all_queries:
         platform = (query[6] if len(query) > 6 and query[6] else "vinted").lower()
         # Skip paused (inactive) queries entirely
@@ -656,6 +660,15 @@ def process_items(queue):
                 "Query is paused - it is not scraped until you resume it",
             )
             continue
+
+        with _QUERY_WORKERS_LOCK:
+            existing = _QUERY_WORKERS.get(query[0])
+            if existing and existing.is_alive():
+                logger.warning(
+                    "Query %s worker is still running; leaving it isolated and "
+                    "continuing with other searches", query[0]
+                )
+                continue
 
         delay = query[8] if len(query) > 8 and query[8] else default_delay
         last_scraped = query[9] if len(query) > 9 and query[9] else 0
@@ -669,25 +682,19 @@ def process_items(queue):
             )
             continue  # not due yet
 
-        queries_by_platform[platform].append(query)
-
-    if not queries_by_platform:
-        return
-
-    # One thread per platform -> the three scrapers run in parallel
-    threads = [
-        threading.Thread(
-            target=_scrape_platform_queries,
-            args=(platform, queries, items_per_query, queue),
-            name=f"scraper-{platform}",
+        worker = threading.Thread(
+            target=_scrape_query_worker,
+            args=(platform, query, items_per_query, queue),
+            name=f"query-{query[0]}-{platform}",
             daemon=True,
         )
-        for platform, queries in queries_by_platform.items()
-    ]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+        with _QUERY_WORKERS_LOCK:
+            # Re-check under the same lock used for registration.
+            existing = _QUERY_WORKERS.get(query[0])
+            if existing and existing.is_alive():
+                continue
+            _QUERY_WORKERS[query[0]] = worker
+        worker.start()
 
 
 def clear_item_queue(items_queue, new_items_queue):
@@ -697,6 +704,11 @@ def clear_item_queue(items_queue, new_items_queue):
     """
     if not items_queue.empty():
         data, query_id = items_queue.get()
+        set_log_context(
+            platform=db.get_query_platform(query_id),
+            query_id=query_id,
+            worker="item-extractor",
+        )
         banwords_str = db.get_parameter("banwords")
 
         # Timestamp-less Vinted results use an observation timestamp. Prime a

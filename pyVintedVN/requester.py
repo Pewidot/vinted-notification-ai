@@ -9,15 +9,20 @@ import threading
 # the TLS/JA3 handshake. The plain `requests` library gets challenged (HTTP 200
 # with an HTML "Please wait" page instead of JSON), so we use curl_cffi which can
 # impersonate a real browser's TLS fingerprint and pass the challenge.
-from curl_cffi import requests
-from curl_cffi.requests.exceptions import (
-    HTTPError,
-    ProxyError,
-    Timeout,
-    ConnectTimeout,
-    ReadTimeout,
-    ConnectionError as ReqConnectionError,
-)
+try:
+    from curl_cffi import requests
+    from curl_cffi.requests.exceptions import (
+        HTTPError, ProxyError, Timeout, ConnectTimeout, ReadTimeout,
+        ConnectionError as ReqConnectionError,
+    )
+    CURL_CFFI_AVAILABLE = True
+except ImportError:  # Allows parser/unit tests in minimal environments.
+    import requests
+    from requests.exceptions import (
+        HTTPError, ProxyError, Timeout, ConnectTimeout, ReadTimeout,
+        ConnectionError as ReqConnectionError,
+    )
+    CURL_CFFI_AVAILABLE = False
 
 # Browser profile used by curl_cffi to impersonate the TLS fingerprint.
 # "chrome" tracks the latest supported Chrome version in the installed curl_cffi.
@@ -30,6 +35,12 @@ from pyVintedVN.settings import Urls
 
 # Get logger for this module
 logger = get_logger(__name__)
+
+
+def _new_session():
+    if CURL_CFFI_AVAILABLE:
+        return requests.Session(impersonate=IMPERSONATE_BROWSER)
+    return requests.Session()
 
 
 class Requester:
@@ -78,7 +89,7 @@ class Requester:
         timeout_str = db.get_parameter("request_timeout")
         self.REQUEST_TIMEOUT = int(timeout_str) if timeout_str else 30
 
-        self.session = requests.Session(impersonate=IMPERSONATE_BROWSER)
+        self.session = _new_session()
         self.session.headers.update(self.HEADER)
 
         # This object is a process-wide singleton whose session, headers and
@@ -182,7 +193,9 @@ class Requester:
 
     def _get_locked(self, url, params=None):
         # Set a random proxy for this request
-        proxy_configured, current_proxy = proxies.configure_proxy(self.session, "vinted")
+        proxy_configured, current_proxy = proxies.configure_proxy(
+            self.session, "vinted", attempt=1
+        )
         if proxy_configured:
             logger.info(f"Making request to {url} using proxy: {current_proxy}")
         else:
@@ -214,10 +227,36 @@ class Requester:
                     )
                     self.set_cookies()
                 elif response.status_code == 200:
+                    if is_catalogue_request:
+                        try:
+                            payload = response.json()
+                            if isinstance(payload.get("items"), list):
+                                proxies.mark_proxy_working(current_proxy, "vinted")
+                        except Exception:
+                            # A Cloudflare HTML challenge can be HTTP 200; it is
+                            # not a successful real query and must not enter the
+                            # used-working pool.
+                            pass
                     logger.info(
                         f"Request successful (HTTP 200) | Proxy: {current_proxy or 'None'}"
                     )
                     return response
+                elif response.status_code == 429 or response.status_code >= 500:
+                    if current_proxy:
+                        proxies.blacklist_proxy(current_proxy, "vinted")
+                    proxy_retries += 1
+                    if proxy_retries >= max_proxy_retries:
+                        raise HTTPError(
+                            f"Vinted HTTP {response.status_code} after "
+                            f"{proxy_retries} proxy attempts"
+                        )
+                    proxy_configured, current_proxy = proxies.configure_proxy(
+                        self.session, "vinted", attempt=proxy_retries + 1
+                    )
+                    if is_catalogue_request:
+                        self.set_cookies()
+                    tried = 0
+                    continue
                 elif tried == self.MAX_RETRIES:
                     # If we've reached max retries, return the last response
                     # even if it's not a 200 status code
@@ -235,7 +274,7 @@ class Requester:
                         new_session = True
                         # Close old session before creating new one to prevent memory leak
                         old_session = self.session
-                        self.session = requests.Session(impersonate=IMPERSONATE_BROWSER)
+                        self.session = _new_session()
                         self.session.headers.update(self.HEADER)
                         try:
                             old_session.close()
@@ -246,14 +285,18 @@ class Requester:
                         if current_proxy and proxy_retries < max_proxy_retries:
                             logger.warning(f"Blacklisting failed proxy and trying another: {current_proxy}")
                             proxies.blacklist_proxy(current_proxy, "vinted")
-                            proxy_configured, current_proxy = proxies.configure_proxy(self.session, "vinted")
                             proxy_retries += 1
+                            proxy_configured, current_proxy = proxies.configure_proxy(
+                                self.session, "vinted", attempt=proxy_retries + 1
+                            )
                             if proxy_configured:
                                 logger.info(f"Retrying with new proxy: {current_proxy}")
                             else:
                                 logger.warning("No more proxies available, continuing without proxy")
                         else:
-                            proxy_configured, current_proxy = proxies.configure_proxy(self.session, "vinted")
+                            proxy_configured, current_proxy = proxies.configure_proxy(
+                                self.session, "vinted", attempt=proxy_retries + 1
+                            )
 
                         tried = 0
                         self.set_cookies()
@@ -289,7 +332,9 @@ class Requester:
                     logger.warning(f"Attempting retry {proxy_retries}/{max_proxy_retries} with different proxy...")
 
                     # Get a new proxy
-                    proxy_configured, current_proxy = proxies.configure_proxy(self.session, "vinted")
+                    proxy_configured, current_proxy = proxies.configure_proxy(
+                        self.session, "vinted", attempt=proxy_retries + 1
+                    )
                     if proxy_configured:
                         logger.info(f"Retrying with new proxy: {current_proxy}")
                         if is_catalogue_request:

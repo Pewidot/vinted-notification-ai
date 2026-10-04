@@ -5,6 +5,7 @@ import debug_log
 import proxies
 import os
 import re
+import time
 from urllib.parse import urlparse, parse_qs
 from datetime import datetime
 from logger import get_logger
@@ -138,6 +139,34 @@ def index():
     # Get proxy statistics (aggregated + per platform)
     proxy_stats = proxies.get_all_proxy_stats()
 
+    try:
+        stuck_after = max(30, int(params.get("query_timeout", "15")) * 2)
+    except (TypeError, ValueError):
+        stuck_after = 30
+    now = time.time()
+    worker_states = []
+    for row in db.get_query_worker_states():
+        state = row[3]
+        age = int(now - (row[5] or now)) if state == "running" else 0
+        worker_states.append({
+            "query_id": row[0], "name": row[1], "platform": row[2],
+            "state": "stuck" if state == "running" and age > stuck_after else state,
+            "worker_id": row[4], "started_at": row[5], "finished_at": row[6],
+            "age": age, "error": row[8], "runs": row[9], "successes": row[10],
+        })
+    scan_rows = {row[0]: row for row in db.get_proxy_scan_states()}
+    proxy_scan_states = []
+    for platform in proxies.PLATFORMS:
+        row = scan_rows.get(platform)
+        proxy_scan_states.append({
+            "platform": platform,
+            "state": row[1] if row else "idle",
+            "checked": row[5] if row else 0,
+            "total": row[6] if row else 0,
+            "working": row[7] if row else 0,
+            "error": row[8] if row else None,
+        })
+
     return render_template(
         "index.html",
         params=params,
@@ -147,6 +176,8 @@ def index():
         rss_running=rss_running,
         stats=stats,
         proxy_stats=proxy_stats,
+        worker_states=worker_states,
+        proxy_scan_states=proxy_scan_states,
     )
 
 
@@ -379,7 +410,8 @@ def items():
 @app.route("/config")
 def config():
     params = db.get_all_parameters()
-    return render_template("config.html", params=params)
+    proxy_lists = {platform: db.get_proxy_lists(platform) for platform in proxies.PLATFORMS}
+    return render_template("config.html", params=params, proxy_lists=proxy_lists)
 
 
 @app.route("/update_config", methods=["POST"])
@@ -416,23 +448,35 @@ def update_config():
     db.set_parameter("query_timeout", request.form.get("query_timeout", "15"))
 
     # Per-platform proxy lists (vinted, kleinanzeigen, ebay)
+    changed_proxy_platforms = []
     for platform in proxies.PLATFORMS:
+        old_list = db.get_parameter(f"proxy_list_{platform}") or ""
+        old_link = db.get_parameter(f"proxy_list_link_{platform}") or ""
+        new_list = request.form.get(f"proxy_list_{platform}", "")
+        new_link = request.form.get(f"proxy_list_link_{platform}", "")
         db.set_parameter(
-            f"proxy_list_{platform}", request.form.get(f"proxy_list_{platform}", "")
+            f"proxy_list_{platform}", new_list
         )
         db.set_parameter(
             f"proxy_list_link_{platform}",
-            request.form.get(f"proxy_list_link_{platform}", ""),
+            new_link,
         )
-        # Reset this platform's proxy cache so the change takes effect on next use
-        db.set_parameter(f"last_proxy_check_time_{platform}", "1")
+        if old_list != new_list or old_link != new_link:
+            changed_proxy_platforms.append(platform)
+            # Literal entries can be used immediately. Provider URLs remain
+            # untouched until the operator explicitly requests a full scan.
+            proxies.sync_configured_proxy_pool(platform)
 
     # Update Advanced parameters
     db.set_parameter("message_template", request.form.get("message_template", ""))
     db.set_parameter("user_agents", request.form.get("user_agents", "[]"))
     db.set_parameter("default_headers", request.form.get("default_headers", "{}"))
 
-    logger.info("Configuration updated, per-platform proxy caches reset")
+    logger.info(
+        "Configuration updated%s; no automatic proxy rescan was started",
+        f" (proxy sources changed: {', '.join(changed_proxy_platforms)})"
+        if changed_proxy_platforms else "",
+    )
 
     flash("Configuration updated", "success")
     return redirect(url_for("config"))
@@ -440,20 +484,13 @@ def update_config():
 
 @app.route("/reset_proxies", methods=["POST"])
 def reset_proxies():
-    # Wipe all proxy data (pools, blacklists, counts) for every platform and
-    # signal every process to reload. Then re-validate all platforms in parallel
-    # in the background so the request returns immediately.
-    proxies.reset_all_proxy_data()
-    import threading
-
-    threading.Thread(
-        target=proxies.validate_all_platforms,
-        kwargs={"parallel": True},
-        name="proxy-reset-revalidate",
-        daemon=True,
-    ).start()
+    # A complete scan is deliberately manual and non-destructive. Each
+    # platform gets a separate background worker and normal queries continue.
+    platform = request.form.get("platform") or None
+    started = proxies.start_complete_proxy_rescan(platform)
     flash(
-        "All proxy data reset. Re-validating Vinted, Kleinanzeigen and eBay proxies in parallel...",
+        "Started complete proxy scan workers for: "
+        + (", ".join(started) if started else "none (already running)"),
         "success",
     )
     return redirect(url_for("config"))
@@ -693,7 +730,7 @@ def clear_allowlist():
 
 @app.route("/logs")
 def logs():
-    return render_template("logs.html")
+    return render_template("logs.html", queries=db.get_queries(), platforms=proxies.PLATFORMS)
 
 
 @app.route("/api/logs")
@@ -701,6 +738,8 @@ def api_logs():
     offset = int(request.args.get("offset", 0))
     limit = int(request.args.get("limit", 100))
     level_filter = request.args.get("level", "all")
+    platform_filter = request.args.get("platform", "all").strip().lower()
+    query_filter = request.args.get("query", "all").strip()
 
     log_file_path = os.path.join("logs", "vinted.log")
 
@@ -730,8 +769,24 @@ def api_logs():
                 if match:
                     timestamp, module, level, message = match.groups()
 
+                    context = {}
+                    context_match = re.match(
+                        r"^\[(?=[^]]*(?:platform|query|worker)=)([^]]+)\]\s*(.*)$",
+                        message,
+                    )
+                    if context_match:
+                        for part in context_match.group(1).split():
+                            if "=" in part:
+                                key, value = part.split("=", 1)
+                                context[key] = value
+                        message = context_match.group(2)
+
                     # Apply level filter if specified
                     if level_filter != "all" and level != level_filter:
+                        continue
+                    if platform_filter != "all" and context.get("platform") != platform_filter:
+                        continue
+                    if query_filter != "all" and context.get("query") != query_filter:
                         continue
 
                     total_matching_entries += 1
@@ -748,6 +803,9 @@ def api_logs():
                                 "module": module.strip(),
                                 "level": level,
                                 "message": message,
+                                "platform": context.get("platform", ""),
+                                "query_id": context.get("query", ""),
+                                "worker": context.get("worker", ""),
                             }
                         )
                         current_entry += 1

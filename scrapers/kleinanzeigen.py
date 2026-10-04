@@ -224,7 +224,9 @@ def _fetch(url):
 
     last_error = None
     for attempt in range(1, MAX_PROXY_RETRIES + 1):
-        proxy_configured, current_proxy = proxies.configure_proxy(session, "kleinanzeigen")
+        proxy_configured, current_proxy = proxies.configure_proxy(
+            session, "kleinanzeigen", attempt=attempt
+        )
         if current_proxy is None and proxies_configured:
             # Pool ran dry mid-rotation: pause instead of going direct
             proxies.mark_pool_exhausted("kleinanzeigen")
@@ -241,6 +243,7 @@ def _fetch(url):
                 # Kleinanzeigen currently omits a charset from Content-Type,
                 # causing requests to assume ISO-8859-1 for its UTF-8 HTML.
                 response.encoding = "utf-8"
+                proxies.mark_proxy_working(current_proxy, "kleinanzeigen")
                 return response.text
             last_error = requests.HTTPError(f"HTTP {response.status_code}")
             logger.warning(

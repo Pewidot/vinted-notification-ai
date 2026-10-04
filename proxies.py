@@ -6,6 +6,7 @@ from requests.exceptions import RequestException
 import concurrent.futures
 from typing import List, Optional
 from logger import get_logger
+from logger import log_context
 
 # Get logger for this module
 logger = get_logger(__name__)
@@ -999,3 +1000,306 @@ def get_proxy_dict(platform: str = DEFAULT_PLATFORM, proxy: Optional[str] = None
     if proxy is None:
         return None, None
     return convert_proxy_string_to_dict(proxy), proxy
+
+
+# ---------------------------------------------------------------------------
+# Durable proxy lifecycle (v1.0.7.4)
+# ---------------------------------------------------------------------------
+
+_SCAN_THREADS = {}
+_SCAN_LOCK = threading.Lock()
+
+
+def _split_proxy_values(raw: Optional[str]) -> List[str]:
+    if not raw:
+        return []
+    # Configuration historically used semicolons, but accepting newlines makes
+    # pasted provider lists considerably easier to manage.
+    return [value.strip() for value in raw.replace("\r", "\n").replace("\n", ";").split(";")
+            if value.strip()]
+
+
+def configured_proxies(platform: str, fetch_link: bool = False) -> List[str]:
+    """Return the configured pool; provider URLs are fetched only for a manual scan."""
+    import db
+
+    platform = _normalize_platform(platform)
+    values = _split_proxy_values(db.get_parameter(_pkey("proxy_list", platform)))
+    if fetch_link:
+        link = (db.get_parameter(_pkey("proxy_list_link", platform)) or "").strip()
+        if link:
+            values.extend(fetch_proxies_from_link(link))
+    return list(dict.fromkeys(values))
+
+
+def sync_configured_proxy_pool(platform: str):
+    """Make newly entered literal proxies available without running a scan."""
+    import db
+
+    platform = _normalize_platform(platform)
+    db.seed_proxy_pool(platform, configured_proxies(platform, fetch_link=False))
+
+
+def bootstrap_durable_proxy_state():
+    """One-time import of legacy pools/blacklists after the schema migration."""
+    import db
+    import json
+
+    for platform in PLATFORMS:
+        if db.get_proxy_state_counts(platform)[0] > 0:
+            continue
+        values = configured_proxies(platform, fetch_link=False)
+        values.extend(
+            _split_proxy_values(db.get_parameter(_pkey("validated_proxies", platform)))
+        )
+        try:
+            legacy_blacklist = json.loads(
+                db.get_parameter(_pkey("proxy_blacklist", platform)) or "{}"
+            )
+            blacklisted = list(legacy_blacklist) if isinstance(legacy_blacklist, dict) else []
+        except (TypeError, ValueError):
+            blacklisted = []
+        db.seed_proxy_pool(platform, values + blacklisted)
+        for proxy in blacklisted:
+            db.mark_proxy_result(platform, proxy, False)
+
+
+def _ensure_durable_pool(platform: str):
+    import db
+
+    platform = _normalize_platform(platform)
+    if db.get_proxy_state_counts(platform)[0] == 0:
+        candidates = configured_proxies(platform, fetch_link=False)
+        # Preserve the last legacy validated pool during an upgrade.
+        candidates.extend(
+            _split_proxy_values(db.get_parameter(_pkey("validated_proxies", platform)))
+        )
+        db.seed_proxy_pool(platform, candidates)
+
+
+def get_random_proxy(platform: str = DEFAULT_PLATFORM,
+                     exclude_blacklisted: bool = True,
+                     attempt: int = 1) -> Optional[str]:
+    """
+    Pick a proxy from the durable platform pool.
+
+    Attempts one and two use any available proxy. Attempt three and later first
+    use the Used/Working list (a proxy whose last real search succeeded).
+    """
+    import db
+
+    platform = _normalize_platform(platform)
+    _ensure_durable_pool(platform)
+    candidates = []
+    if int(attempt or 1) >= 3:
+        candidates = db.get_proxy_candidates(platform, working_only=True)
+        if candidates:
+            logger.info(
+                "[%s] Retry %s: selecting from %s used-working proxies",
+                platform, attempt, len(candidates),
+            )
+    if not candidates:
+        candidates = db.get_proxy_candidates(platform, working_only=False)
+    if not candidates:
+        return None
+    return random.choice(candidates)
+
+
+def configure_proxy(session: requests.Session, platform: str = DEFAULT_PLATFORM,
+                    proxy: Optional[str] = None, attempt: int = 1) -> tuple[bool, Optional[str]]:
+    platform = _normalize_platform(platform)
+    if proxy is None:
+        proxy = get_random_proxy(platform, attempt=attempt)
+    if proxy is None:
+        session.proxies.clear()
+        return False, None
+    session.proxies.clear()
+    session.proxies.update(convert_proxy_string_to_dict(proxy))
+    return True, proxy
+
+
+def get_proxy_dict(platform: str = DEFAULT_PLATFORM, proxy: Optional[str] = None,
+                   attempt: int = 1) -> tuple[Optional[dict], Optional[str]]:
+    platform = _normalize_platform(platform)
+    if proxy is None:
+        proxy = get_random_proxy(platform, attempt=attempt)
+    if proxy is None:
+        return None, None
+    return convert_proxy_string_to_dict(proxy), proxy
+
+
+def mark_proxy_working(proxy: str, platform: str = DEFAULT_PLATFORM):
+    """A real search returned a valid page through this proxy."""
+    if not proxy:
+        return
+    import db
+    db.mark_proxy_result(_normalize_platform(platform), proxy, True)
+
+
+def blacklist_proxy(proxy: str, platform: str = DEFAULT_PLATFORM,
+                    duration: Optional[int] = None):
+    """Permanently query-blacklist a failed proxy until a full scan clears it."""
+    if not proxy:
+        return
+    import db
+    platform = _normalize_platform(platform)
+    db.mark_proxy_result(platform, proxy, False)
+    logger.warning(
+        "[%s] Query-blacklisted proxy %s until a complete rescan validates it",
+        platform, proxy,
+    )
+
+
+def usable_proxy_count(platform: str) -> int:
+    import db
+    _ensure_durable_pool(platform)
+    return db.get_proxy_state_counts(_normalize_platform(platform))[4]
+
+
+def pool_cooldown_remaining(platform: str) -> int:
+    # Pools no longer self-reset. Recovery is an explicit complete rescan.
+    return 0
+
+
+def mark_pool_exhausted(platform: str):
+    logger.error(
+        "[%s] No usable proxy remains; a complete manual proxy rescan is required",
+        _normalize_platform(platform),
+    )
+
+
+def require_proxy(platform: str):
+    platform = _normalize_platform(platform)
+    if has_proxies_configured(platform) and usable_proxy_count(platform) == 0:
+        raise NoProxyAvailable(
+            f"{platform}: proxy pool exhausted; run a complete manual rescan"
+        )
+
+
+def complete_proxy_rescan(platform: str) -> dict:
+    """Fully scan one platform in its own worker and publish results atomically."""
+    import db
+
+    platform = _normalize_platform(platform)
+    with log_context(platform=platform, worker=f"proxy-scan-{platform}"):
+        try:
+            all_proxies = configured_proxies(platform, fetch_link=False)
+            link = (db.get_parameter(_pkey("proxy_list_link", platform)) or "").strip()
+            if link:
+                linked = fetch_proxies_from_link(link)
+                if not linked:
+                    raise RuntimeError(
+                        "Proxy provider URL returned no proxies; keeping the previous pool"
+                    )
+                all_proxies = list(dict.fromkeys(all_proxies + linked))
+            total = len(all_proxies)
+            db.set_proxy_scan_state(platform, "running", 0, total, 0)
+            logger.info("Starting complete manual proxy rescan (%s proxies)", total)
+            working = []
+            checked = 0
+            if all_proxies:
+                with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=min(MAX_PROXY_WORKERS, max(1, total)),
+                    thread_name_prefix=f"scan-{platform}",
+                ) as executor:
+                    def scan_one(proxy):
+                        with log_context(platform=platform, worker=f"proxy-scan-{platform}"):
+                            return check_proxy(proxy, platform)
+
+                    future_map = {
+                        executor.submit(scan_one, proxy): proxy for proxy in all_proxies
+                    }
+                    for future in concurrent.futures.as_completed(future_map):
+                        proxy = future_map[future]
+                        checked += 1
+                        try:
+                            if future.result():
+                                working.append(proxy)
+                        except Exception as exc:
+                            logger.warning("Proxy scan failed for %s: %s", proxy, exc)
+                        db.set_proxy_scan_state(
+                            platform, "running", checked, total, len(working)
+                        )
+            db.replace_proxy_scan_results(platform, all_proxies, working)
+            # Legacy mirrors keep older UI/API consumers compatible.
+            db.set_parameter(_pkey("validated_proxies", platform), ";".join(working))
+            db.set_parameter(_pkey("validated_proxy_count", platform), str(len(working)))
+            db.set_parameter(_pkey("last_proxy_check_time", platform), str(time.time()))
+            db.set_proxy_scan_state(platform, "healthy", checked, total, len(working))
+            logger.info("Complete proxy rescan finished: %s/%s scan-valid", len(working), total)
+            return {"total": total, "scan_valid": len(working)}
+        except Exception as exc:
+            db.set_proxy_scan_state(platform, "error", error=exc)
+            logger.exception("Complete proxy rescan failed")
+            return {"total": 0, "scan_valid": 0, "error": str(exc)}
+        finally:
+            with _SCAN_LOCK:
+                _SCAN_THREADS.pop(platform, None)
+
+
+def start_complete_proxy_rescan(platform: Optional[str] = None) -> List[str]:
+    """Start independent manual scan workers; never joins or blocks query workers."""
+    targets = [_normalize_platform(platform)] if platform else list(PLATFORMS)
+    started = []
+    with _SCAN_LOCK:
+        for target in targets:
+            existing = _SCAN_THREADS.get(target)
+            if existing and existing.is_alive():
+                continue
+            worker = threading.Thread(
+                target=complete_proxy_rescan,
+                args=(target,),
+                name=f"proxy-scan-{target}",
+                daemon=True,
+            )
+            _SCAN_THREADS[target] = worker
+            worker.start()
+            started.append(target)
+    return started
+
+
+def validate_all_platforms(parallel: bool = True) -> dict:
+    """Compatibility wrapper for explicit/manual rescans."""
+    if parallel:
+        return {platform: "started" for platform in start_complete_proxy_rescan()}
+    return {platform: complete_proxy_rescan(platform) for platform in PLATFORMS}
+
+
+def reset_all_proxy_data():
+    """Deprecated compatibility hook: a reset now means a non-destructive rescan."""
+    logger.info("Proxy reset requested; preserving lists/blacklists and starting manual scans")
+
+
+def get_proxy_stats(platform: str = DEFAULT_PLATFORM) -> dict:
+    import db
+
+    platform = _normalize_platform(platform)
+    _ensure_durable_pool(platform)
+    total, working, query_blacklisted, scan_blacklisted, available = \
+        db.get_proxy_state_counts(platform)
+    return {
+        "platform": platform,
+        "total_proxies": total,
+        "working_proxies": working,
+        "query_blacklisted_proxies": query_blacklisted,
+        "scan_blacklisted_proxies": scan_blacklisted,
+        "blacklisted_proxies": total - available,
+        "active_proxies": available,
+        "available_proxies": available,
+        "validation_enabled": db.get_parameter("check_proxies") == "True",
+    }
+
+
+def get_all_proxy_stats() -> dict:
+    per_platform = {platform: get_proxy_stats(platform) for platform in PLATFORMS}
+    keys = (
+        "total_proxies", "working_proxies", "query_blacklisted_proxies",
+        "scan_blacklisted_proxies", "blacklisted_proxies", "available_proxies",
+    )
+    result = {key: sum(stats[key] for stats in per_platform.values()) for key in keys}
+    result["active_proxies"] = result["available_proxies"]
+    result["validation_enabled"] = any(
+        stats["validation_enabled"] for stats in per_platform.values()
+    )
+    result["per_platform"] = per_platform
+    return result
