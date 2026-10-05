@@ -2,6 +2,7 @@ import sqlite3
 from traceback import print_exc
 
 DB_PATH = "./data/vinted_notifications.db"
+WORKING_PROXY_BLACKLIST_SECONDS = 60 * 60
 
 # The items table doubles as the persistent ID-deduplication store, so filtered
 # Vinted listings still need to be recorded there. Keep non-EUR Vinted rows out
@@ -733,21 +734,40 @@ def replace_proxy_scan_results(platform, all_proxies, working_scan_proxies):
     try:
         conn = get_db_connection()
         conn.execute("BEGIN IMMEDIATE")
-        previously_working = {
-            row[0] for row in conn.execute(
-                "SELECT proxy FROM proxy_state WHERE platform=? AND working=1",
+        previous = {
+            row[0]: row[1:] for row in conn.execute(
+                """SELECT proxy, working, query_blacklisted, scan_blacklisted,
+                          working_blacklisted_until, last_success, last_failure,
+                          last_scan FROM proxy_state WHERE platform=?""",
                 (platform,),
             ).fetchall()
         }
+        # A missing source entry is not evidence that a blocked proxy recovered.
+        # Retain its history until it is actually tested again.
+        retained = all_set | {
+            proxy for proxy, state in previous.items()
+            if state[1] or state[2] or state[3] > now
+        }
+        results = []
+        for proxy in sorted(retained):
+            working, query_blocked, scan_blocked, until, success, failure, last_scan = (
+                previous.get(proxy, (0, 0, 0, 0, None, None, None))
+            )
+            if proxy in all_set:
+                last_scan = now
+                if proxy in valid:
+                    query_blocked, scan_blocked, until = 0, 0, 0
+                else:
+                    working, scan_blocked = 0, 1
+            results.append((platform, proxy, working, query_blocked, scan_blocked,
+                            until, success, failure, last_scan))
         conn.execute("DELETE FROM proxy_state WHERE platform=?", (platform,))
         conn.executemany(
             """INSERT INTO proxy_state
                (platform, proxy, working, query_blacklisted, scan_blacklisted,
-                last_scan)
-               VALUES (?, ?, ?, 0, ?, ?)""",
-            [(platform, proxy, 1 if proxy in valid and proxy in previously_working else 0,
-              0 if proxy in valid else 1, now)
-             for proxy in sorted(all_set)],
+                working_blacklisted_until, last_success, last_failure, last_scan)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            results,
         )
         conn.commit()
     finally:
@@ -756,7 +776,11 @@ def replace_proxy_scan_results(platform, all_proxies, working_scan_proxies):
 
 
 def mark_proxy_result(platform, proxy, success):
-    """Record whether a real search returned a usable result through a proxy."""
+    """Record a query result; failed former successes get a 60-minute cooldown.
+
+    Return the blacklist category on failure. Retaining last_success means a
+    formerly working proxy can cool down again if its retry also fails.
+    """
     import time as _time
 
     if not proxy:
@@ -770,53 +794,83 @@ def mark_proxy_result(platform, proxy, success):
             (platform, proxy),
         )
         if success:
+            # An already-in-flight success must not lift a cooldown or a scan
+            # blacklist created by another worker. Eligibility is checked when
+            # selecting proxies and when calculating visible counts/lists.
             conn.execute(
                 """UPDATE proxy_state SET working=1, last_success=?
                    WHERE platform=? AND proxy=?""",
                 (now, platform, proxy),
             )
         else:
+            working, last_success, query_blocked, scan_blocked = conn.execute(
+                """SELECT working, last_success, query_blacklisted, scan_blacklisted
+                   FROM proxy_state WHERE platform=? AND proxy=?""",
+                (platform, proxy),
+            ).fetchone()
+            temporary = (working or last_success is not None) and not (
+                query_blocked or scan_blocked
+            )
             conn.execute(
                 """UPDATE proxy_state
-                   SET working=0, query_blacklisted=1, last_failure=?
+                   SET working=0, query_blacklisted=?, last_failure=?,
+                       working_blacklisted_until=?
                    WHERE platform=? AND proxy=?""",
-                (now, platform, proxy),
+                (0 if temporary else 1, now,
+                 now + WORKING_PROXY_BLACKLIST_SECONDS if temporary else 0,
+                 platform, proxy),
             )
         conn.commit()
+        if not success:
+            return "working" if temporary else "query"
     finally:
         if conn:
             conn.close()
 
 
 def get_proxy_candidates(platform, working_only=False):
+    import time as _time
+
     conn = None
     try:
         conn = get_db_connection()
         sql = (
             "SELECT proxy FROM proxy_state WHERE platform=? "
-            "AND query_blacklisted=0 AND scan_blacklisted=0"
+            "AND query_blacklisted=0 AND scan_blacklisted=0 "
+            "AND working_blacklisted_until<=?"
         )
         if working_only:
             sql += " AND working=1"
-        return [row[0] for row in conn.execute(sql, (platform,)).fetchall()]
+        return [row[0] for row in conn.execute(sql, (platform, _time.time())).fetchall()]
     finally:
         if conn:
             conn.close()
 
 
 def get_proxy_state_counts(platform):
+    """Counts: total, working, query-blocked, scan-blocked, available, cooling down."""
+    import time as _time
+
+    now = _time.time()
     conn = None
     try:
         conn = get_db_connection()
         row = conn.execute(
             """SELECT COUNT(*),
-                      COALESCE(SUM(working), 0),
+                      COALESCE(SUM(CASE WHEN working=1 AND query_blacklisted=0
+                                        AND scan_blacklisted=0
+                                        AND working_blacklisted_until<=?
+                                        THEN 1 ELSE 0 END), 0),
                       COALESCE(SUM(query_blacklisted), 0),
                       COALESCE(SUM(scan_blacklisted), 0),
                       COALESCE(SUM(CASE WHEN query_blacklisted=0
-                                        AND scan_blacklisted=0 THEN 1 ELSE 0 END), 0)
+                                        AND scan_blacklisted=0
+                                        AND working_blacklisted_until<=?
+                                        THEN 1 ELSE 0 END), 0),
+                      COALESCE(SUM(CASE WHEN working_blacklisted_until>?
+                                        THEN 1 ELSE 0 END), 0)
                FROM proxy_state WHERE platform=?""",
-            (platform,),
+            (now, now, now, platform),
         ).fetchone()
         return tuple(int(value or 0) for value in row)
     finally:
@@ -825,20 +879,26 @@ def get_proxy_state_counts(platform):
 
 
 def get_proxy_lists(platform):
+    import time as _time
+
     conn = None
     try:
         conn = get_db_connection()
         rows = conn.execute(
-            """SELECT proxy, working, query_blacklisted, scan_blacklisted
+            """SELECT proxy, working, query_blacklisted, scan_blacklisted,
+                      working_blacklisted_until
                FROM proxy_state WHERE platform=? ORDER BY proxy""",
             (platform,),
         ).fetchall()
+        now = _time.time()
         return {
             "all": [row[0] for row in rows],
-            "working": [row[0] for row in rows if row[1]],
+            "working": [row[0] for row in rows
+                        if row[1] and not row[2] and not row[3] and row[4] <= now],
             "query_blacklisted": [row[0] for row in rows if row[2]],
             "scan_blacklisted": [row[0] for row in rows if row[3]],
-            "blacklisted": [row[0] for row in rows if row[2] or row[3]],
+            "working_blacklisted": [row[0] for row in rows if row[4] > now],
+            "blacklisted": [row[0] for row in rows if row[2] or row[3] or row[4] > now],
         }
     finally:
         if conn:

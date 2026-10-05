@@ -204,16 +204,21 @@ at [http://localhost:8080](http://localhost:8080).
 ### Proxy Support
 
 The application keeps an independent proxy pool for Vinted, Kleinanzeigen and
-eBay. Each pool exposes three operational lists in the configuration UI:
+eBay. Each pool exposes these operational lists in the configuration UI:
 
 - **All**: every proxy known for that platform.
 - **Used / Working**: proxies whose most recent real search returned a valid page.
-- **Blacklisted**: query failures and manual-scan failures (shown separately on
-  the dashboard).
+- **Blacklisted**: all currently blocked proxies, with separate query, scan and
+  Used/Working counts on the dashboard.
+- **Used / Working Blacklist**: previously successful proxies that failed a
+  query. They become eligible again automatically 60 minutes after failure,
+  including across restarts. Another failure starts a new 60-minute cooldown;
+  a successful query returns the proxy to Used/Working.
 
 The first two request attempts use the available pool. Attempt three prefers
-Used / Working proxies. Blacklists do not expire automatically; only a complete
-manual rescan can restore a proxy after validating it. Rescans use one
+Used / Working proxies. The regular query and scan blacklists do not expire;
+only a complete manual rescan can restore those proxies after validating them.
+Expiry of a Used/Working cooldown does not trigger a scan. Rescans use one
 background worker per platform and never pause search workers. Saving unrelated
 settings does not trigger a rescan.
 

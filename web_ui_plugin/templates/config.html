@@ -192,8 +192,8 @@
                                                 {% endfor %}
                                                 <small class="form-text text-muted mb-0">Manual only. Each platform
                                                     scans in its own background worker while searches continue.
-                                                    Blacklisted proxies are restored only when this scan proves them
-                                                    valid.</small>
+                                                    Query and scan blacklists require a successful scan.
+                                                    Used/Working cooldowns also expire automatically after 60 minutes.</small>
                                             </div>
                                             <p class="text-muted mb-3">
                                                 Each platform uses its own proxy list, validated against that
@@ -231,18 +231,23 @@
                                                                value="{{ params['proxy_list_link_' + plat] }}">
                                                     </div>
                                                     <div class="row g-2 mb-3">
-                                                        <div class="col-md-4">
+                                                        <div class="col-md-6 col-xl-3">
                                                             <label class="form-label">All Proxies ({{ proxy_lists[plat]['all']|length }})</label>
                                                             <textarea class="form-control font-monospace" rows="6" readonly>{{ proxy_lists[plat]['all']|join('\n') }}</textarea>
                                                         </div>
-                                                        <div class="col-md-4">
+                                                        <div class="col-md-6 col-xl-3">
                                                             <label class="form-label text-success">Used / Working ({{ proxy_lists[plat]['working']|length }})</label>
                                                             <textarea class="form-control font-monospace" rows="6" readonly>{{ proxy_lists[plat]['working']|join('\n') }}</textarea>
                                                         </div>
-                                                        <div class="col-md-4">
+                                                        <div class="col-md-6 col-xl-3">
                                                             <label class="form-label text-danger">Blacklisted ({{ proxy_lists[plat]['blacklisted']|length }})</label>
                                                             <textarea class="form-control font-monospace" rows="6" readonly>{{ proxy_lists[plat]['blacklisted']|join('\n') }}</textarea>
-                                                            <small class="text-muted">Query: {{ proxy_lists[plat]['query_blacklisted']|length }} · Scan: {{ proxy_lists[plat]['scan_blacklisted']|length }}</small>
+                                                            <small class="text-muted">Query: {{ proxy_lists[plat]['query_blacklisted']|length }} · Scan: {{ proxy_lists[plat]['scan_blacklisted']|length }} · Used/Working: {{ proxy_lists[plat]['working_blacklisted']|length }}</small>
+                                                        </div>
+                                                        <div class="col-md-6 col-xl-3">
+                                                            <label class="form-label text-warning">Used / Working Blacklist ({{ proxy_lists[plat]['working_blacklisted']|length }})</label>
+                                                            <textarea class="form-control font-monospace" rows="6" readonly>{{ proxy_lists[plat]['working_blacklisted']|join('\n') }}</textarea>
+                                                            <small class="text-muted">Automatically eligible again 60 minutes after failure. A successful query returns the proxy to Used/Working.</small>
                                                         </div>
                                                     </div>
                                                 </div>
@@ -275,7 +280,8 @@
                                                        value="{{ params.proxy_blacklist_duration or 60 }}" min="1" max="10080">
                                                 <small class="form-text text-muted">Legacy setting. Query and scan
                                                     blacklists are now durable until a complete manual rescan proves
-                                                    the proxy valid.</small>
+                                                    the proxy valid. The separate Used/Working blacklist always
+                                                    expires after 60 minutes, regardless of this legacy setting.</small>
                                             </div>
                                         </div>
                                     </div>

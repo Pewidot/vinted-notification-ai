@@ -1138,16 +1138,22 @@ def mark_proxy_working(proxy: str, platform: str = DEFAULT_PLATFORM):
 
 def blacklist_proxy(proxy: str, platform: str = DEFAULT_PLATFORM,
                     duration: Optional[int] = None):
-    """Permanently query-blacklist a failed proxy until a full scan clears it."""
+    """Cool down former successes for 60 minutes; durably blacklist other failures."""
     if not proxy:
         return
     import db
     platform = _normalize_platform(platform)
-    db.mark_proxy_result(platform, proxy, False)
-    logger.warning(
-        "[%s] Query-blacklisted proxy %s until a complete rescan validates it",
-        platform, proxy,
-    )
+    category = db.mark_proxy_result(platform, proxy, False)
+    if category == "working":
+        logger.warning(
+            "[%s] Used/working proxy %s failed; temporarily blacklisted for 60 minutes",
+            platform, proxy,
+        )
+    else:
+        logger.warning(
+            "[%s] Query-blacklisted proxy %s until a complete rescan validates it",
+            platform, proxy,
+        )
 
 
 def usable_proxy_count(platform: str) -> int:
@@ -1157,13 +1163,13 @@ def usable_proxy_count(platform: str) -> int:
 
 
 def pool_cooldown_remaining(platform: str) -> int:
-    # Pools no longer self-reset. Recovery is an explicit complete rescan.
+    # No pool-wide cooldown: individual expiry is checked when choosing proxies.
     return 0
 
 
 def mark_pool_exhausted(platform: str):
     logger.error(
-        "[%s] No usable proxy remains; a complete manual proxy rescan is required",
+        "[%s] No usable proxy remains; wait for used/working cooldowns or run a manual rescan",
         _normalize_platform(platform),
     )
 
@@ -1172,7 +1178,8 @@ def require_proxy(platform: str):
     platform = _normalize_platform(platform)
     if has_proxies_configured(platform) and usable_proxy_count(platform) == 0:
         raise NoProxyAvailable(
-            f"{platform}: proxy pool exhausted; run a complete manual rescan"
+            f"{platform}: proxy pool exhausted; wait for used/working cooldowns "
+            "or run a complete manual rescan"
         )
 
 
@@ -1275,7 +1282,7 @@ def get_proxy_stats(platform: str = DEFAULT_PLATFORM) -> dict:
 
     platform = _normalize_platform(platform)
     _ensure_durable_pool(platform)
-    total, working, query_blacklisted, scan_blacklisted, available = \
+    total, working, query_blacklisted, scan_blacklisted, available, working_blacklisted = \
         db.get_proxy_state_counts(platform)
     return {
         "platform": platform,
@@ -1283,6 +1290,7 @@ def get_proxy_stats(platform: str = DEFAULT_PLATFORM) -> dict:
         "working_proxies": working,
         "query_blacklisted_proxies": query_blacklisted,
         "scan_blacklisted_proxies": scan_blacklisted,
+        "working_blacklisted_proxies": working_blacklisted,
         "blacklisted_proxies": total - available,
         "active_proxies": available,
         "available_proxies": available,
@@ -1295,6 +1303,7 @@ def get_all_proxy_stats() -> dict:
     keys = (
         "total_proxies", "working_proxies", "query_blacklisted_proxies",
         "scan_blacklisted_proxies", "blacklisted_proxies", "available_proxies",
+        "working_blacklisted_proxies",
     )
     result = {key: sum(stats[key] for stats in per_platform.values()) for key in keys}
     result["active_proxies"] = result["available_proxies"]

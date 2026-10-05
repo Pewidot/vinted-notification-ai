@@ -110,6 +110,7 @@ CREATE TABLE IF NOT EXISTS proxy_state
     working           INTEGER NOT NULL DEFAULT 0,
     query_blacklisted INTEGER NOT NULL DEFAULT 0,
     scan_blacklisted  INTEGER NOT NULL DEFAULT 0,
+    working_blacklisted_until NUMERIC NOT NULL DEFAULT 0,
     last_success      NUMERIC,
     last_failure      NUMERIC,
     last_scan         NUMERIC,
@@ -138,7 +139,7 @@ VALUES ('telegram_enabled', 'False'),
        ('rss_max_items', '100'),
        ('rss_process_running', 'False'),
 
-       ('version', '1.0.7.4'),
+       ('version', '1.0.7.5'),
        ('github_url', 'https://github.com/Fuyucch1/Vinted-Notifications'),
 
        ('items_per_query', '20'),
